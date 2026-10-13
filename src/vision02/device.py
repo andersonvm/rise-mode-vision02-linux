@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import os
 from contextlib import contextmanager
+from hashlib import sha256
 import select
 import threading
 import time
@@ -39,6 +40,7 @@ class Vision02:
         self._lifecycle_owner = None
         self._local = threading.local()
         self._write_lock = threading.RLock()
+        self._display_cache: dict[int, bytes] = {}
         self._listeners: dict[int, list[Callable[[int], None]]] = {}
         self._release_listeners: dict[int, list[Callable[[int], None]]] = {}
 
@@ -105,6 +107,7 @@ class Vision02:
         self._fd = os.open(self.path, os.O_RDWR | os.O_NONBLOCK)
         self._faulted = False
         self._last_error = None
+        self._display_cache.clear()
         try:
             self.initialize()
         except BaseException:
@@ -136,10 +139,12 @@ class Vision02:
         with self._condition:
             self._faulted = True
             self._last_error = exc
+            self._display_cache.clear()
 
     def _close_session(self) -> None:
         fd = self._fd
         self._fd = None
+        self._display_cache.clear()
         if fd is not None:
             os.close(fd)
 
@@ -211,16 +216,51 @@ class Vision02:
                 time.sleep(0.01)
             time.sleep(0.2)
 
-    def set_image(self, display_id: int, source, *, quality: int = 90, subsampling: int = 0) -> None:
+    def set_image(
+        self,
+        display_id: int,
+        source,
+        *,
+        quality: int = 90,
+        subsampling: int = 0,
+        skip_unchanged: bool = False,
+    ) -> None:
         with self._operation():
-            jpeg = encode_image(source, quality=quality, subsampling=subsampling)
-            reports = tuple(image_reports(display_id, jpeg))
+            jpeg = encode_image(
+                source,
+                quality=quality,
+                subsampling=subsampling,
+            )
+            digest = sha256(jpeg).digest()
+
             with self._transmission():
-                for report in reports:
+                with self._condition:
+                    if self._faulted:
+                        raise RuntimeError(
+                            "Sessão HID em falha; execute reconnect()"
+                        )
+                    if (
+                        skip_unchanged
+                        and self._display_cache.get(display_id) == digest
+                    ):
+                        return
+
+                for report in image_reports(display_id, jpeg):
                     self._write(report)
                     time.sleep(self.report_delay)
+
                 self._write(command(b"STP"))
+
                 time.sleep(self.display_delay)
+
+                # Atualizar somente se a transmissão terminou
+                # e nenhuma outra thread invalidou a sessão.
+                with self._condition:
+                    if self._faulted:
+                        raise RuntimeError(
+                            "Sessão HID em falha; execute reconnect()"
+                        )
+                    self._display_cache[display_id] = digest
 
     def set_image_for_key(self, physical_key: int, source, *, quality: int = 90, subsampling: int = 0) -> None:
         self.set_image(physical_key_to_display_id(physical_key), source, quality=quality, subsampling=subsampling)
