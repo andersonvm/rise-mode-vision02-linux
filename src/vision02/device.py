@@ -30,6 +30,7 @@ class Vision02:
         self._fd: int | None = None
         self._faulted = False
         self._last_error: OSError | None = None
+        self._session_lock = threading.RLock()
         self._write_lock = threading.RLock()
         self._listeners: dict[int, list[Callable[[int], None]]] = {}
         self._release_listeners: dict[int, list[Callable[[int], None]]] = {}
@@ -42,23 +43,24 @@ class Vision02:
         self.close()
 
     def open(self) -> None:
-        if self._fd is not None:
-            if self._faulted:
-                raise RuntimeError(
-                    "Sessão HID em falha; execute reconnect()"
-                )
-            return
+        with self._session_lock:
+            if self._fd is not None:
+                if self._faulted:
+                    raise RuntimeError(
+                        "Sessão HID em falha; execute reconnect()"
+                    )
+                return
 
-        self.path = find_device() if self.path is None else self.path
-        self._fd = os.open(self.path, os.O_RDWR | os.O_NONBLOCK)
-        self._faulted = False
-        self._last_error = None
+            self.path = find_device() if self.path is None else self.path
+            self._fd = os.open(self.path, os.O_RDWR | os.O_NONBLOCK)
+            self._faulted = False
+            self._last_error = None
 
-        try:
-            self.initialize()
-        except Exception:
-            self.close()
-            raise
+            try:
+                self.initialize()
+            except Exception:
+                self.close()
+                raise
 
     @property
     def faulted(self) -> bool:
@@ -69,19 +71,21 @@ class Vision02:
         return self._last_error
 
     def reconnect(self) -> None:
-        """Reconecta explicitamente; não reenvia imagens."""
-        self.close()
-        self.path = None
-        self.open()
+        with self._session_lock:
+            """Reconecta explicitamente; não reenvia imagens."""
+            self.close()
+            self.path = None
+            self.open()
 
     def _record_failure(self, exc: OSError) -> None:
         self._faulted = True
         self._last_error = exc
 
     def close(self) -> None:
-        if self._fd is not None:
-            os.close(self._fd)
-            self._fd = None
+        with self._session_lock:
+            if self._fd is not None:
+                os.close(self._fd)
+                self._fd = None
 
     def _write(self, data: bytes) -> None:
         if self._fd is None:
@@ -132,19 +136,21 @@ class Vision02:
                 raise
 
     def initialize(self) -> None:
-        for payload in INIT_PAYLOADS:
-            self._write(command(payload))
-            time.sleep(0.01)
-        time.sleep(0.2)
+        with self._session_lock:
+            for payload in INIT_PAYLOADS:
+                self._write(command(payload))
+                time.sleep(0.01)
+            time.sleep(0.2)
 
     def set_image(self, display_id: int, source, *, quality: int = 90, subsampling: int = 0) -> None:
-        jpeg = encode_image(source, quality=quality, subsampling=subsampling)
-        with self._write_lock:
-            for report in image_reports(display_id, jpeg):
-                self._write(report)
-                time.sleep(self.report_delay)
-            self._write(command(b"STP"))
-            time.sleep(self.display_delay)
+        with self._session_lock:
+            jpeg = encode_image(source, quality=quality, subsampling=subsampling)
+            with self._write_lock:
+                for report in image_reports(display_id, jpeg):
+                    self._write(report)
+                    time.sleep(self.report_delay)
+                self._write(command(b"STP"))
+                time.sleep(self.display_delay)
 
     def set_image_for_key(self, physical_key: int, source, *, quality: int = 90, subsampling: int = 0) -> None:
         self.set_image(physical_key_to_display_id(physical_key), source, quality=quality, subsampling=subsampling)
@@ -166,34 +172,35 @@ class Vision02:
         registry.setdefault(key_id, []).append(callback)
 
     def read_event(self, timeout: float = 0.5) -> tuple[int, bool] | None:
-        if self._fd is None:
-            raise RuntimeError("Dispositivo não está aberto")
-        if self._faulted:
-            raise RuntimeError(
-                "Sessão HID em falha; execute reconnect()"
-            )
-
-        try:
-            readable, _, _ = select.select(
-                [self._fd], [], [], timeout
-            )
-
-            if not readable:
-                return None
+        with self._session_lock:
+            if self._fd is None:
+                raise RuntimeError("Dispositivo não está aberto")
+            if self._faulted:
+                raise RuntimeError(
+                    "Sessão HID em falha; execute reconnect()"
+                )
 
             try:
-                packet = os.read(self._fd, REPORT_SIZE)
-            except BlockingIOError:
-                return None
+                readable, _, _ = select.select(
+                    [self._fd], [], [], timeout
+                )
 
-            if not packet:
-                raise OSError("Vision 02 desconectada")
+                if not readable:
+                    return None
 
-        except OSError as exc:
-            self._record_failure(exc)
-            raise
+                try:
+                    packet = os.read(self._fd, REPORT_SIZE)
+                except BlockingIOError:
+                    return None
 
-        return parse_key_report(packet)
+                if not packet:
+                    raise OSError("Vision 02 desconectada")
+
+            except OSError as exc:
+                self._record_failure(exc)
+                raise
+
+            return parse_key_report(packet)
 
     def run(self, stop_event: threading.Event | None = None) -> None:
         while stop_event is None or not stop_event.is_set():
