@@ -56,3 +56,55 @@ with Vision02() as controller:
 - Não inclui interface gráfica, reconexão automática, atalhos do sistema ou política de retry cega.
 - Prefira executar como usuário normal se as permissões `udev` o permitirem.
 - O estado da tela é verificado visualmente: não foi identificado ACK de conclusão de cada JPEG.
+
+## Concorrência e ciclo de vida HID
+
+`read_event()` e `set_image()` podem executar em threads distintas. Cada operação
+reserva a sessão por uma contagem protegida por `Condition`; o bloqueio da condição
+é liberado antes do I/O. Operações aninhadas na mesma thread compartilham a reserva.
+`_write_lock` serializa a sequência inteira BAT + JPEG + STP e a inicialização,
+incluindo os intervalos originais. Protocolo e parâmetros JPEG permanecem iguais.
+
+A ordem dos bloqueios é: ciclo de vida → condição, nas transições; reserva sob a
+condição (liberada imediatamente) → escrita, nas transmissões. Quem mantém o
+bloqueio de escrita pode adquirir brevemente a condição para consultar/registrar
+falhas ou liberar reservas. Nenhum caminho mantém a condição enquanto espera pelo
+bloqueio de escrita. `Condition.wait()` libera a condição enquanto aguarda operações.
+Chamadas de ciclo de vida dentro de uma operação da mesma thread são rejeitadas.
+
+`open()`, `close()` e `reconnect()` são serializados pelo bloqueio de ciclo de vida.
+Uma transição fecha a admissão antes de esperar as operações já admitidas; novas
+leituras/escritas recebem `RuntimeError` durante essa janela. Escritores já
+admitidos terminam em ordem serializada antes do fechamento. Isso evita starvation
+por uma thread de leitura contínua. A inicialização é exclusiva e somente a thread
+da transição pode usar a sessão até que ela esteja pronta; falhas, inclusive
+`KeyboardInterrupt`, liberam o descritor recém-aberto.
+
+Leituras usam fatias de `select()` de até 50 ms e retornam `None` ao observar uma
+transição. Uma leitura já pronta pode consumir seu relatório antes de liberar a
+reserva; o descritor continua válido. `run()` propaga erros da sessão; ao encerrar
+uma aplicação, sinalize seu `stop_event` e aguarde a thread para evitar uma nova
+chamada após `close()`. Callbacks são executados fora das reservas HID.
+
+Erros de transporte invalidam a sessão sem repetir relatórios. Transmissões
+interrompidas também invalidam a sessão, pois podem estar incompletas. Operações
+já em andamento podem concluir uma chamada de sistema concorrente com a falha;
+novas operações e relatórios seguintes são bloqueados. `faulted` e `last_error`
+ficam disponíveis; somente a abertura bem-sucedida de uma nova sessão limpa esses
+campos. A recuperação continua explícita por `reconnect()`.
+
+O encerramento aguarda a transmissão completa e os atrasos configurados. Escritas
+não bloqueantes preservam o timeout de 2 s por relatório. Não há prazo global de
+fechamento: codificação lenta, atrasos personalizados, escalonamento ou uma chamada
+travada no kernel podem prolongá-lo. O driver não fecha um descritor ainda em uso
+para tentar interromper I/O. Uma interrupção na espera do fechamento libera o
+estado de transição; o chamador deve repetir `close()` após as operações terminarem.
+
+Teste manual (acessa o hardware; requer `~/Imagens/terminal.png`):
+
+```bash
+.venv/bin/python teste_concorrencia_hid_v2.py
+```
+
+Compare as esperas RX com o timeout solicitado de 50 ms enquanto os displays
+11–13 são atualizados. Os testes automatizados usam somente mocks, sem USB real.

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+from contextlib import contextmanager
 import select
 import threading
 import time
@@ -31,6 +32,12 @@ class Vision02:
         self._faulted = False
         self._last_error: OSError | None = None
         self._session_lock = threading.RLock()
+        self._condition = threading.Condition(self._session_lock)
+        self._lifecycle_lock = threading.Lock()
+        self._active = 0
+        self._closing = False
+        self._lifecycle_owner = None
+        self._local = threading.local()
         self._write_lock = threading.RLock()
         self._listeners: dict[int, list[Callable[[int], None]]] = {}
         self._release_listeners: dict[int, list[Callable[[int], None]]] = {}
@@ -42,70 +49,116 @@ class Vision02:
     def __exit__(self, *_exc) -> None:
         self.close()
 
-    def open(self) -> None:
-        with self._session_lock:
-            if self._fd is not None:
-                if self._faulted:
-                    raise RuntimeError(
-                        "Sessão HID em falha; execute reconnect()"
-                    )
-                return
-
-            self.path = find_device() if self.path is None else self.path
-            self._fd = os.open(self.path, os.O_RDWR | os.O_NONBLOCK)
-            self._faulted = False
-            self._last_error = None
-
+    @contextmanager
+    def _operation(self):
+        if getattr(self._local, "depth", 0):
+            self._local.depth += 1
             try:
-                self.initialize()
-            except Exception:
-                self.close()
-                raise
+                yield self._fd
+            finally:
+                self._local.depth -= 1
+            return
+        with self._condition:
+            if self._closing and self._lifecycle_owner != threading.get_ident():
+                raise RuntimeError("Sessão HID em encerramento")
+            if self._fd is None:
+                raise RuntimeError("Dispositivo não está aberto")
+            if self._faulted:
+                raise RuntimeError("Sessão HID em falha; execute reconnect()")
+            self._active += 1
+            self._local.depth = 1
+            fd = self._fd
+        try:
+            yield fd
+        finally:
+            with self._condition:
+                self._local.depth = 0
+                self._active -= 1
+                self._condition.notify_all()
+
+    @contextmanager
+    def _transition(self):
+        if getattr(self._local, "depth", 0):
+            raise RuntimeError("Ciclo de vida chamado durante operação HID")
+        with self._lifecycle_lock:
+            with self._condition:
+                self._closing = True
+                self._lifecycle_owner = threading.get_ident()
+                self._condition.notify_all()
+            try:
+                with self._condition:
+                    while self._active:
+                        self._condition.wait()
+                yield
+            finally:
+                with self._condition:
+                    self._closing = False
+                    self._lifecycle_owner = None
+                    self._condition.notify_all()
+
+    def _open_session(self) -> None:
+        if self._fd is not None:
+            if self._faulted:
+                raise RuntimeError("Sessão HID em falha; execute reconnect()")
+            return
+        self.path = find_device() if self.path is None else self.path
+        self._fd = os.open(self.path, os.O_RDWR | os.O_NONBLOCK)
+        self._faulted = False
+        self._last_error = None
+        try:
+            self.initialize()
+        except BaseException:
+            self._close_session()
+            raise
+
+    def open(self) -> None:
+        with self._transition():
+            self._open_session()
 
     @property
     def faulted(self) -> bool:
-        return self._faulted
+        with self._condition:
+            return self._faulted
 
     @property
     def last_error(self) -> OSError | None:
-        return self._last_error
+        with self._condition:
+            return self._last_error
 
     def reconnect(self) -> None:
-        with self._session_lock:
-            """Reconecta explicitamente; não reenvia imagens."""
-            self.close()
+        """Reconecta explicitamente; não reenvia imagens."""
+        with self._transition():
+            self._close_session()
             self.path = None
-            self.open()
+            self._open_session()
 
     def _record_failure(self, exc: OSError) -> None:
-        self._faulted = True
-        self._last_error = exc
+        with self._condition:
+            self._faulted = True
+            self._last_error = exc
+
+    def _close_session(self) -> None:
+        fd = self._fd
+        self._fd = None
+        if fd is not None:
+            os.close(fd)
 
     def close(self) -> None:
-        with self._session_lock:
-            if self._fd is not None:
-                os.close(self._fd)
-                self._fd = None
+        with self._transition():
+            self._close_session()
 
     def _write(self, data: bytes) -> None:
-        if self._fd is None:
-            raise RuntimeError("Dispositivo não está aberto")
-
-        if self._faulted:
-            raise RuntimeError(
-                "Sessão HID em falha; execute reconnect()"
-            )
-
         if len(data) != REPORT_SIZE:
             raise ValueError("Relatório deve ter 512 bytes")
-
-        with self._write_lock:
+        with self._operation() as fd, self._write_lock:
+            if self.faulted:
+                raise RuntimeError("Sessão HID em falha; execute reconnect()")
             deadline = time.monotonic() + 2.0
 
             try:
                 while True:
                     try:
-                        written = os.write(self._fd, data)
+                        written = os.write(fd, data)
                         break
 
                     except BlockingIOError:
@@ -117,7 +170,7 @@ class Vision02:
                             )
 
                         _, writable, _ = select.select(
-                            [], [self._fd], [], remaining
+                            [], [fd], [], remaining
                         )
 
                         if not writable:
@@ -135,18 +188,35 @@ class Vision02:
                 self._record_failure(exc)
                 raise
 
+    @contextmanager
+    def _transmission(self):
+        with self._operation(), self._write_lock:
+            if self.faulted:
+                raise RuntimeError("Sessão HID em falha; execute reconnect()")
+            try:
+                yield
+            except BaseException as exc:
+                # A partial sequence cannot safely be resumed, even on Ctrl+C.
+                if not self.faulted:
+                    self._record_failure(
+                        exc if isinstance(exc, OSError)
+                        else OSError("Transmissão HID interrompida")
+                    )
+                raise
+
     def initialize(self) -> None:
-        with self._session_lock:
+        with self._transmission():
             for payload in INIT_PAYLOADS:
                 self._write(command(payload))
                 time.sleep(0.01)
             time.sleep(0.2)
 
     def set_image(self, display_id: int, source, *, quality: int = 90, subsampling: int = 0) -> None:
-        with self._session_lock:
+        with self._operation():
             jpeg = encode_image(source, quality=quality, subsampling=subsampling)
-            with self._write_lock:
-                for report in image_reports(display_id, jpeg):
+            reports = tuple(image_reports(display_id, jpeg))
+            with self._transmission():
+                for report in reports:
                     self._write(report)
                     time.sleep(self.report_delay)
                 self._write(command(b"STP"))
@@ -171,25 +241,26 @@ class Vision02:
             raise ValueError("ID de tecla deve estar entre 1 e 15")
         registry.setdefault(key_id, []).append(callback)
 
-    def read_event(self, timeout: float = 0.5) -> tuple[int, bool] | None:
-        with self._session_lock:
-            if self._fd is None:
-                raise RuntimeError("Dispositivo não está aberto")
-            if self._faulted:
-                raise RuntimeError(
-                    "Sessão HID em falha; execute reconnect()"
-                )
-
+    def read_event(self, timeout: float | None = 0.5) -> tuple[int, bool] | None:
+        with self._operation() as fd:
+            deadline = None if timeout is None else time.monotonic() + max(0, timeout)
             try:
-                readable, _, _ = select.select(
-                    [self._fd], [], [], timeout
-                )
+                while True:
+                    with self._condition:
+                        if self._closing:
+                            return None
+                        if self._faulted:
+                            raise RuntimeError("Sessão HID em falha; execute reconnect()")
+                    remaining = 0.05 if deadline is None else max(0, deadline - time.monotonic())
+                    readable, _, _ = select.select([fd], [], [], min(0.05, remaining))
+                    if readable or (deadline is not None and time.monotonic() >= deadline):
+                        break
 
                 if not readable:
                     return None
 
                 try:
-                    packet = os.read(self._fd, REPORT_SIZE)
+                    packet = os.read(fd, REPORT_SIZE)
                 except BlockingIOError:
                     return None
 
