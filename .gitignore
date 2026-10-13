@@ -1,0 +1,42 @@
+# Ambientes virtuais
+.venv/
+venv/
+env/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+
+# Testes
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Build
+build/
+dist/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Backups
+*.bak
+
+# Logs
+*.log
+
+# Arquivos temporários
+*.tmp
+
+# Capturas USB
+*.pcap
+*.pcapng
+
+# Resultados experimentais
+resultados/

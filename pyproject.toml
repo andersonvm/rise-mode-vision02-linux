@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "rise-mode-vision02"
+version = "0.1.0"
+description = "Controlador experimental Linux para Rise Mode Vision 02 USB HID"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = ["Pillow>=9.2"]
+
+[project.scripts]
+vision02 = "vision02.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8",
+    ]
