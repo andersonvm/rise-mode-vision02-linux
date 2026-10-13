@@ -1,0 +1,23 @@
+version: 1
+name: Desenvolvimento
+
+keys:
+  1:
+    label: Terminal
+    action:
+      type: command
+      argv:
+        - gnome-terminal
+
+  2:
+    label: GitHub
+    action:
+      type: url
+      url: https://github.com
+
+  3:
+    label: VS Code
+    action:
+      type: command
+      argv:
+        - code

@@ -1,0 +1,27 @@
+version: 1
+name: Diagnóstico HID
+
+keys:
+  1:
+    label: Tecla 01
+    action:
+      type: command
+      argv:
+        - /usr/bin/touch
+        - /tmp/vision02-tecla-01
+
+  2:
+    label: Tecla 02
+    action:
+      type: command
+      argv:
+        - /usr/bin/touch
+        - /tmp/vision02-tecla-02
+
+  3:
+    label: Tecla 03
+    action:
+      type: command
+      argv:
+        - /usr/bin/touch
+        - /tmp/vision02-tecla-03
