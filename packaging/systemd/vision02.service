@@ -1,0 +1,23 @@
+[Unit]
+Description=Rise Mode Vision 02 - Controlador HID com recuperacao USB
+Documentation=man:systemd.service(5)
+After=graphical-session.target
+PartOf=graphical-session.target
+StartLimitIntervalSec=120
+StartLimitBurst=3
+
+[Service]
+Type=simple
+WorkingDirectory=%h/projetos/rise-mode-vision02/rise-mode-vision02-linux
+ExecStart=%h/projetos/rise-mode-vision02/rise-mode-vision02-linux/.venv/bin/python -m vision02.hotplug examples/profiles/desenvolvimento-switch.yaml --with examples/profiles/observabilidade.yaml
+Environment=PYTHONUNBUFFERED=1
+Restart=on-failure
+RestartSec=5s
+KillSignal=SIGINT
+KillMode=mixed
+TimeoutStopSec=30s
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=graphical-session.target
