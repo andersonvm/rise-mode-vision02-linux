@@ -36,6 +36,7 @@ class Vision02Controller:
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
         self._lock = threading.Lock()
+        self._suspended = False
 
     def start(self) -> None:
         """Inicia a thread de execução uma única vez."""
@@ -60,21 +61,27 @@ class Vision02Controller:
             self._thread.start()
 
     def handle_event(self, key_id: int, pressed: bool) -> bool:
-        """Enfileira uma ação somente no pressionamento."""
+        """Enfileira pressionamentos somente quando o perfil está ativo."""
         if not pressed:
-            return False
-
-        config = self.profile.keys.get(key_id)
-
-        if config is None:
             return False
 
         with self._lock:
             if (
-                self._stop_event.is_set()
+                self._suspended
+                or self._stop_event.is_set()
                 or self._thread is None
                 or not self._thread.is_alive()
             ):
+                return False
+
+            config = self.profile.keys.get(key_id)
+
+            if config is None:
+                return False
+
+            # Trocas de perfil são coordenadas pela CLI.
+            # Nunca devem chegar ao executor de comandos.
+            if config.action.type == "profile":
                 return False
 
             try:
@@ -86,7 +93,55 @@ class Vision02Controller:
                 )
                 return False
 
-        return True
+            return True
+
+    def suspend(self) -> None:
+        """Bloqueia novos despachos durante uma transição."""
+        with self._lock:
+            if (
+                self._stop_event.is_set()
+                or self._thread is None
+                or not self._thread.is_alive()
+            ):
+                raise RuntimeError("Controlador não está ativo")
+
+            self._suspended = True
+
+    def wait_idle(self, timeout: float = 5.0) -> bool:
+        """Aguarda a fila ficar vazia, incluindo ações em execução."""
+        if timeout < 0:
+            raise ValueError("timeout não pode ser negativo")
+
+        with self._queue.all_tasks_done:
+            return self._queue.all_tasks_done.wait_for(
+                lambda: self._queue.unfinished_tasks == 0,
+                timeout=timeout,
+            )
+
+    def activate(self, profile: Profile) -> None:
+        """Ativa outro perfil e libera novos despachos atomicamente."""
+        if not isinstance(profile, Profile):
+            raise TypeError("profile deve ser uma instância de Profile")
+
+        with self._lock:
+            if self._stop_event.is_set():
+                raise RuntimeError("Controlador encerrado")
+
+            if not self._suspended:
+                raise RuntimeError(
+                    "É necessário suspender o controlador antes da troca"
+                )
+
+            self.profile = profile
+            self._suspended = False
+
+    def resume(self) -> None:
+        """Cancela uma suspensão sem alterar o perfil ativo."""
+        with self._lock:
+            if self._stop_event.is_set():
+                raise RuntimeError("Controlador encerrado")
+
+            self._suspended = False
 
     def _worker(self) -> None:
         """Processa ações na ordem de recebimento."""

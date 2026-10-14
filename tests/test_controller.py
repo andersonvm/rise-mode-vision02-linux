@@ -260,3 +260,169 @@ def test_start_during_shutdown_is_rejected(profile):
     finally:
         release.set()
         controller.stop(timeout=3)
+
+
+def test_suspend_rejects_new_presses(profile):
+    executed = []
+    controller = Vision02Controller(
+        profile,
+        executor=executed.append,
+    )
+
+    controller.start()
+    controller.suspend()
+
+    assert not controller.handle_event(1, True)
+    assert controller.wait_idle(timeout=1)
+
+    controller.stop()
+
+    assert executed == []
+
+
+def test_activate_changes_action_mapping(profile):
+    executed = []
+
+    new_profile = Profile(
+        name="Novo",
+        keys={
+            1: KeyConfig(
+                key_id=1,
+                label="Nova ação",
+                action=Action(
+                    type="command",
+                    argv=("nova-acao",),
+                ),
+            ),
+        },
+    )
+
+    controller = Vision02Controller(
+        profile,
+        executor=executed.append,
+    )
+
+    controller.start()
+
+    assert controller.handle_event(1, True)
+
+    controller.suspend()
+
+    assert controller.wait_idle(timeout=2)
+
+    controller.activate(new_profile)
+
+    assert controller.handle_event(1, True)
+
+    controller.stop()
+
+    assert executed == [
+        profile.keys[1].action,
+        new_profile.keys[1].action,
+    ]
+
+
+def test_resume_restores_previous_profile(profile):
+    executed = []
+
+    controller = Vision02Controller(
+        profile,
+        executor=executed.append,
+    )
+
+    controller.start()
+    controller.suspend()
+
+    assert not controller.handle_event(1, True)
+
+    controller.resume()
+
+    assert controller.handle_event(1, True)
+
+    controller.stop()
+
+    assert executed == [profile.keys[1].action]
+
+
+def test_wait_idle_timeout_when_action_is_running(profile):
+    started = threading.Event()
+    release = threading.Event()
+
+    def executor(_action):
+        started.set()
+        release.wait(timeout=3)
+
+    controller = Vision02Controller(
+        profile,
+        executor=executor,
+    )
+
+    controller.start()
+
+    try:
+        assert controller.handle_event(1, True)
+        assert started.wait(timeout=2)
+
+        controller.suspend()
+
+        assert not controller.wait_idle(timeout=0.01)
+        assert not controller.handle_event(2, True)
+
+    finally:
+        release.set()
+        controller.stop(timeout=3)
+
+
+def test_profile_action_not_sent_to_executor():
+    profile = Profile(
+        name="Desenvolvimento",
+        keys={
+            15: KeyConfig(
+                key_id=15,
+                label="Observabilidade",
+                action=Action(
+                    type="profile",
+                    target="Observabilidade",
+                ),
+            ),
+        },
+    )
+
+    executed = []
+
+    controller = Vision02Controller(
+        profile,
+        executor=executed.append,
+    )
+
+    controller.start()
+
+    assert not controller.handle_event(15, True)
+
+    controller.stop()
+
+    assert executed == []
+
+
+def test_activate_requires_suspension(profile):
+    controller = Vision02Controller(
+        profile,
+        executor=lambda _: None,
+    )
+
+    controller.start()
+
+    with pytest.raises(RuntimeError, match="suspender"):
+        controller.activate(Profile(name="Outro"))
+
+    controller.stop()
+
+
+def test_wait_idle_rejects_negative_timeout(profile):
+    controller = Vision02Controller(
+        profile,
+        executor=lambda _: None,
+    )
+
+    with pytest.raises(ValueError, match="timeout"):
+        controller.wait_idle(timeout=-1)
