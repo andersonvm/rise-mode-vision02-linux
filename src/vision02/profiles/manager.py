@@ -135,3 +135,26 @@ class ProfileManager:
                 )
 
             return profile
+
+
+def validate_profile_targets(manager: ProfileManager) -> None:
+    """Verifica se todos os destinos de troca estão registrados.
+
+    Não acessa o hardware nem executa ações.
+    """
+    names = set(manager.list_profiles())
+
+    for profile_name in names:
+        profile = manager.get(profile_name)
+
+        for key_id, config in profile.keys.items():
+            action = config.action
+
+            if action.type != "profile":
+                continue
+
+            if action.target not in names:
+                raise ProfileManagerError(
+                    f"Perfil {profile_name!r}, tecla {key_id:02d}: "
+                    f"destino não registrado: {action.target!r}"
+                )

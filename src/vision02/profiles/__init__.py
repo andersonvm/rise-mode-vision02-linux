@@ -2,7 +2,7 @@
 
 from .loader import ProfileValidationError, load_profile
 from .models import Action, KeyConfig, Profile
-from .manager import ProfileManager, ProfileManagerError
+from .manager import ProfileManager, ProfileManagerError, validate_profile_targets
 
 __all__ = [
     "Action",
@@ -11,5 +11,6 @@ __all__ = [
     "ProfileValidationError",
     "ProfileManager",
     "ProfileManagerError",
+    "validate_profile_targets",
     "load_profile",
 ]

@@ -212,3 +212,74 @@ def test_concurrent_switches_preserve_valid_state(manager):
         "Desenvolvimento",
         "Observabilidade",
     }
+
+
+def test_profile_targets_valid(tmp_path):
+    from vision02.profiles import validate_profile_targets
+
+    development = tmp_path / "development.yaml"
+    development.write_text(
+        """
+version: 1
+name: Desenvolvimento
+keys:
+  15:
+    label: Observabilidade
+    action:
+      type: profile
+      target: Observabilidade
+""",
+        encoding="utf-8",
+    )
+
+    observability = tmp_path / "observability.yaml"
+    observability.write_text(
+        """
+version: 1
+name: Observabilidade
+keys:
+  15:
+    label: Desenvolvimento
+    action:
+      type: profile
+      target: Desenvolvimento
+""",
+        encoding="utf-8",
+    )
+
+    manager = ProfileManager()
+    manager.load_many([development, observability])
+
+    validate_profile_targets(manager)
+
+    assert manager.active_name == "Desenvolvimento"
+
+
+def test_profile_target_missing(tmp_path):
+    from vision02.profiles import validate_profile_targets
+
+    path = tmp_path / "development.yaml"
+    path.write_text(
+        """
+version: 1
+name: Desenvolvimento
+keys:
+  15:
+    label: Inexistente
+    action:
+      type: profile
+      target: PerfilInexistente
+""",
+        encoding="utf-8",
+    )
+
+    manager = ProfileManager()
+    manager.load(path)
+
+    with pytest.raises(
+        ProfileManagerError,
+        match="destino não registrado",
+    ):
+        validate_profile_targets(manager)
+
+    assert manager.active_name == "Desenvolvimento"
