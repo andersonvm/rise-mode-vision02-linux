@@ -207,6 +207,9 @@ def main(argv: list[str] | None = None) -> None:
     if len(profiles) > 1:
         command.extend(["--with", *(str(p) for p in profiles[1:])])
 
+    # O filho é o único dono do HID e publica o socket local da interface.
+    command.append("--ipc")
+
     supervisor = HotplugSupervisor(
         command, interval=args.interval, max_retry=args.max_retry
     )

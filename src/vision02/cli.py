@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import argparse
+import json
 from pathlib import Path
 
 from .controller import Vision02Controller
+from .control_ipc import ControlServer, request as ipc_request
 from .actions.executor import close_wayland_keyboard
 from .device import Vision02, find_device
 from .profiles import (
@@ -57,6 +59,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Executa um perfil na Vision 02",
     )
     run.add_argument("path", type=Path)
+    run.add_argument("--ipc", action="store_true", help="Habilita controle local para GUI e CLI")
     run.add_argument(
         "--with",
         dest="other_paths",
@@ -66,6 +69,13 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="PROFILE",
         help="Perfis adicionais disponíveis para alternância",
     )
+
+    control = sub.add_parser("control", help="Consulta e controla a instância ativa sem abrir HID")
+    control_sub = control.add_subparsers(dest="control_action", required=True)
+    control_sub.add_parser("status", help="Estado e perfil ativo")
+    control_sub.add_parser("profiles", help="Perfis disponíveis")
+    control_switch = control_sub.add_parser("switch", help="Ativa um perfil existente")
+    control_switch.add_argument("target", help="Nome exato do perfil")
 
     return parser
 
@@ -82,7 +92,7 @@ def _print_profile(profile) -> None:
         )
 
 
-def _run_profile(manager: ProfileManager) -> None:
+def _run_profile(manager: ProfileManager, *, ipc: bool = False) -> None:
     """Executa perfis em uma única sessão HID."""
     profile = manager.active
     controller = Vision02Controller(profile)
@@ -119,6 +129,24 @@ def _run_profile(manager: ProfileManager) -> None:
             drain_events=drain_events,
         )
 
+        control_server: ControlServer | None = None
+
+        def handle_control(command: str, target: str | None) -> dict:
+            if command == "status":
+                return {
+                    "connected": True,
+                    "active": manager.active_name,
+                    "profiles": list(manager.list_profiles()),
+                }
+            if command == "profiles":
+                return {"profiles": list(manager.list_profiles())}
+            if command == "switch" and target is not None:
+                changed = switcher.switch(target)
+                if changed:
+                    print(f"Perfil ativo: {manager.active_name}", flush=True)
+                return {"active": manager.active_name, "changed": changed}
+            raise ValueError("Comando IPC desconhecido")
+
         try:
             controller.start()
 
@@ -129,6 +157,10 @@ def _run_profile(manager: ProfileManager) -> None:
                     skip_unchanged=True,
                 )
 
+            if ipc:
+                control_server = ControlServer()
+                control_server.start()
+
             print(
                 f"Perfil ativo: {profile.name}. "
                 "Aguardando teclas; Ctrl+C encerra.",
@@ -136,6 +168,8 @@ def _run_profile(manager: ProfileManager) -> None:
             )
 
             while True:
+                if control_server is not None:
+                    control_server.process_pending(handle_control)
                 event = device.read_event(timeout=0.2)
 
                 if event is None:
@@ -179,6 +213,8 @@ def _run_profile(manager: ProfileManager) -> None:
             print("\\nEncerrando perfil...", flush=True)
 
         finally:
+            if control_server is not None:
+                control_server.close()
             try:
                 controller.stop()
             finally:
@@ -207,6 +243,19 @@ def main(argv=None) -> None:
             )
         return
 
+    if args.action == "control":
+        try:
+            response = ipc_request(
+                args.control_action,
+                getattr(args, "target", None),
+            )
+        except (ConnectionError, OSError, RuntimeError, ValueError, TimeoutError) as exc:
+            parser.error(str(exc))
+        print(json.dumps(response, ensure_ascii=False, indent=2))
+        if not response["ok"]:
+            raise SystemExit(1)
+        return
+
     if args.action == "profile":
         if args.profile_action == "validate":
             try:
@@ -229,7 +278,10 @@ def main(argv=None) -> None:
         ) as exc:
             parser.error(f"Perfis inválidos: {exc}")
 
-        _run_profile(manager)
+        if args.ipc:
+            _run_profile(manager, ipc=True)
+        else:
+            _run_profile(manager)
         return
 
     if args.action == "image" and not 1 <= args.id <= 15:
