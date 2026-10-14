@@ -108,11 +108,20 @@ keys:
         device_class.return_value.__enter__.return_value = device
         main(["profile", "run", str(path)])
 
-    device.set_image.assert_called_once_with(
+    assert device.set_image.call_count == 15
+
+    device.set_image.assert_any_call(
         physical_key_to_display_id(1),
         image.resolve(),
         skip_unchanged=True,
     )
+
+    display_ids = {
+        call.args[0]
+        for call in device.set_image.call_args_list
+    }
+
+    assert display_ids == set(range(1, 16))
 
 
 def test_existing_mapping_command_without_usb(capsys):

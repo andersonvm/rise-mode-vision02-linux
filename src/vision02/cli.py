@@ -8,6 +8,7 @@ from pathlib import Path
 from .controller import Vision02Controller
 from .device import Vision02, find_device
 from .profiles import ProfileValidationError, load_profile
+from .rendering import render_profile
 from .protocol import physical_key_to_display_id
 
 
@@ -71,13 +72,14 @@ def _run_profile(profile) -> None:
         try:
             controller.start()
 
-            for key_id, config in sorted(profile.keys.items()):
-                if config.image is not None:
-                    device.set_image(
-                        physical_key_to_display_id(key_id),
-                        config.image,
-                        skip_unchanged=True,
-                    )
+            images = render_profile(profile)
+
+            for key_id, image in images.items():
+                device.set_image(
+                    physical_key_to_display_id(key_id),
+                    image,
+                    skip_unchanged=True,
+                )
 
             print(
                 f"Perfil ativo: {profile.name}. "
