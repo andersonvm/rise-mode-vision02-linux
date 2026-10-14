@@ -21,6 +21,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from vision02.profiles import load_profile
+from vision02.icon_library import list_icons, import_icon
 from vision02.user_profiles import default_profile_paths
 from vision02.rendering import render_profile
 from vision02.protocol import physical_key_to_display_id
@@ -232,12 +233,20 @@ def save_key(project: Path, name: str, key_id: int, edited: dict,
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description="Backend YAML da GUI Vision 02; não acessa HID")
     parser.add_argument("--project", type=Path, default=ROOT)
-    parser.add_argument("--command", required=True, choices=("list", "inspect", "preview", "save"))
+    parser.add_argument("--command", required=True, choices=("list", "inspect", "preview", "save", "icons-list", "icons-import"))
     parser.add_argument("--profile")
     args = parser.parse_args(argv)
     try:
         if args.command == "list":
             result = {"ok": True, "profiles": list(allowed_profiles(args.project))}
+        elif args.command == "icons-list":
+            result = {"ok": True, "icons": list_icons()}
+        elif args.command == "icons-import":
+            request = json.load(sys.stdin)
+            source = request.get("source")
+            if not isinstance(source, str) or not source.strip():
+                raise ValueError("Informe o arquivo de imagem")
+            result = {"ok": True, "icon": import_icon(Path(source))}
         else:
             if not args.profile:
                 raise ValueError("Informe --profile")

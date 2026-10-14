@@ -20,7 +20,7 @@ METADATA = ROOT / "apps/vision02_gui_data.py"
 import gi
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
-from gi.repository import Adw, Gio, GLib, Gtk
+from gi.repository import Adw, Gio, GLib, Gtk, Pango
 
 KINDS = ("none", "command", "url", "script", "hotkey", "profile")
 KIND_LABELS = ("Sem ação", "Comando", "URL", "Script", "Atalho", "Trocar perfil")
@@ -42,6 +42,131 @@ def backend(command, profile=None, payload=None, timeout=20):
     if not response.get("ok"):
         raise RuntimeError(response.get("error", "Falha desconhecida"))
     return response
+
+class IconLibraryWindow(Gtk.Window):
+    """Seletor e importador de ícones; não escreve diretamente em YAML."""
+
+    def __init__(self, parent, on_select):
+        super().__init__(title="Biblioteca de ícones — Vision 02", transient_for=parent, modal=True)
+        self.set_default_size(610, 520)
+        self.set_destroy_with_parent(True)
+        self.on_select = on_select
+        self.importing = False
+        layout = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
+        for margin in ("margin_top", "margin_bottom", "margin_start", "margin_end"):
+            setattr(layout.props, margin, 16)
+        self.set_child(layout)
+
+        header = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        title = Gtk.Label(label="Ícones pessoais (100 × 100)")
+        title.add_css_class("title-3")
+        title.set_hexpand(True)
+        title.set_xalign(0)
+        header.append(title)
+        self.import_btn = Gtk.Button(label="Importar imagem…")
+        self.import_btn.connect("clicked", self._open_import)
+        header.append(self.import_btn)
+        layout.append(header)
+        message = Gtk.Label(label="Clique em um ícone para usá-lo na tecla selecionada. "
+                                   "A imagem só será aplicada ao dispositivo após salvar e recarregar.")
+        message.set_wrap(True)
+        message.set_xalign(0)
+        message.add_css_class("dim-label")
+        layout.append(message)
+        scroller = Gtk.ScrolledWindow()
+        scroller.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        scroller.set_vexpand(True)
+        layout.append(scroller)
+        self.flow = Gtk.FlowBox()
+        self.flow.set_selection_mode(Gtk.SelectionMode.NONE)
+        self.flow.set_max_children_per_line(4)
+        self.flow.set_min_children_per_line(2)
+        self.flow.set_column_spacing(12)
+        self.flow.set_row_spacing(12)
+        scroller.set_child(self.flow)
+        self.status = Gtk.Label(label="")
+        self.status.set_wrap(True)
+        self.status.set_xalign(0)
+        layout.append(self.status)
+        self._refresh()
+
+    def _refresh(self):
+        try:
+            icons = backend("icons-list")["icons"]
+        except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as exc:
+            self.status.set_text(f"Falha ao consultar a biblioteca: {exc}")
+            return
+        while child := self.flow.get_first_child():
+            self.flow.remove(child)
+        for info in icons:
+            tile = Gtk.Button()
+            tile.set_size_request(128, 138)
+            contents = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+            contents.set_halign(Gtk.Align.CENTER)
+            picture = Gtk.Picture.new_for_file(Gio.File.new_for_path(info["path"]))
+            picture.set_size_request(96, 96)
+            picture.set_content_fit(Gtk.ContentFit.CONTAIN)
+            contents.append(picture)
+            name = Gtk.Label(label=info["name"][:30])
+            name.set_max_width_chars(14)
+            name.set_ellipsize(Pango.EllipsizeMode.END)
+            contents.append(name)
+            tile.set_child(contents)
+            tile.set_tooltip_text(info["path"])
+            tile.connect("clicked", self._select_icon, info["path"])
+            self.flow.append(tile)
+        self.status.set_text(f"{len(icons)} ícone(s) disponíveis. "
+                             + ("Use Importar imagem para adicionar o primeiro." if not icons else ""))
+
+    def _select_icon(self, _button, path):
+        self.on_select(path)
+        self.close()
+
+    def _open_import(self, *_):
+        if self.importing:
+            return
+        dialog = Gtk.FileDialog.new()
+        dialog.set_title("Importar imagem para a biblioteca")
+        filters = Gio.ListStore.new(Gtk.FileFilter)
+        fmt = Gtk.FileFilter()
+        fmt.set_name("Imagens PNG, JPEG e WEBP")
+        for mime in ("image/png", "image/jpeg", "image/webp"):
+            fmt.add_mime_type(mime)
+        filters.append(fmt)
+        dialog.set_filters(filters)
+        dialog.open(self, None, self._import_chosen)
+
+    def _import_chosen(self, dialog, result):
+        try:
+            chosen = dialog.open_finish(result)
+        except GLib.Error as exc:
+            if not exc.matches(Gio.io_error_quark(), Gio.IOErrorEnum.CANCELLED):
+                self.status.set_text(f"Erro ao escolher imagem: {exc}")
+            return
+        if not chosen or not chosen.get_path():
+            self.status.set_text("A imagem deve ser um arquivo local.")
+            return
+        self.importing = True
+        self.import_btn.set_sensitive(False)
+        self.status.set_text("Importando e ajustando a imagem para 100 × 100…")
+        def worker():
+            try:
+                icon = backend("icons-import", payload={"source": chosen.get_path()}, timeout=40)["icon"]
+                error = None
+            except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as exc:
+                icon, error = None, str(exc)
+            GLib.idle_add(self._import_complete, icon, error)
+        threading.Thread(target=worker, daemon=True, name="vision02-icon-import").start()
+
+    def _import_complete(self, icon, error):
+        self.importing = False
+        self.import_btn.set_sensitive(True)
+        if error:
+            self.status.set_text(f"Erro ao importar imagem: {error}")
+        else:
+            self._refresh()
+            self.status.set_text(f"Ícone disponível: {icon['name']}. Clique nele para selecionar.")
+        return False
 
 
 class EditorWindow(Adw.ApplicationWindow):
@@ -129,6 +254,10 @@ class EditorWindow(Adw.ApplicationWindow):
         image_row_child = Gtk.Button(label="Escolher…")
         image_row_child.connect("clicked", self._choose_image)
         image_row.append(image_row_child)
+        library_btn = Gtk.Button(label="Biblioteca…")
+        library_btn.set_tooltip_text("Escolher um ícone reutilizável ou importar nova imagem")
+        library_btn.connect("clicked", self._open_icon_library)
+        image_row.append(library_btn)
         right.append(image_row)
 
         right.append(Gtk.Label(label="Tipo de ação"))
@@ -266,6 +395,25 @@ class EditorWindow(Adw.ApplicationWindow):
             if not exc.matches(Gio.io_error_quark(), Gio.IOErrorEnum.CANCELLED):
                 self.status.set_text(f"Falha ao selecionar imagem: {exc}")
 
+    def _open_icon_library(self, *_):
+        if self.busy or not self.profile:
+            return
+        chooser = IconLibraryWindow(self, self._choose_library_icon)
+        chooser.present()
+
+    def _choose_library_icon(self, path):
+        self.entries["image"].set_text(path)
+        self.image_paths[self.selected_key] = path
+        self._draw_board()
+        self.status.set_text("Ícone selecionado. Configure rótulo e ação, pré-visualize e salve o YAML.")
+
+    def _highlight_selected(self):
+        for number, button in self.key_buttons.items():
+            if number == self.selected_key:
+                button.add_css_class("suggested-action")
+            else:
+                button.remove_css_class("suggested-action")
+
     def _on_key_selected(self, _, key_id):
         if self.busy or key_id == self.selected_key:
             return
@@ -274,6 +422,7 @@ class EditorWindow(Adw.ApplicationWindow):
             return
         self.selected_key = key_id
         self._populate_form()
+        self._highlight_selected()
 
     def _on_profile_changed(self, combo, _):
         if self._syncing or self.busy:
@@ -321,10 +470,15 @@ class EditorWindow(Adw.ApplicationWindow):
                 picture.set_size_request(96, 96)
                 picture.set_content_fit(Gtk.ContentFit.CONTAIN)
                 box.append(picture)
-            label = Gtk.Label(label=f"Tecla {physical:02d}")
+            current_label = self.profile["keys"].get(str(physical), {}).get("label", "") if self.profile else ""
+            label = Gtk.Label(label=f"{physical:02d} · {current_label}" if current_label else f"Tecla {physical:02d}")
             label.add_css_class("caption")
+            label.set_max_width_chars(13)
+            label.set_ellipsize(Pango.EllipsizeMode.END)
             box.append(label)
             btn.set_child(box)
+            btn.set_tooltip_text(f"Tecla física {physical:02d}: {current_label or 'sem ação'}")
+        self._highlight_selected()
 
     def _populate_form(self):
         if not self.profile:
