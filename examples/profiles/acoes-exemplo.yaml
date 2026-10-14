@@ -1,0 +1,27 @@
+# Perfil separado: não altera Desenvolvimento nem Observabilidade.
+# Atalho hotkey: GNOME Wayland (consentimento) ou X11 (xdotool).
+version: 1
+name: Exemplos de ações
+keys:
+  1:
+    label: Terminal
+    action:
+      type: command
+      argv: [gnome-terminal]
+  2:
+    label: GitHub
+    action:
+      type: url
+      url: https://github.com
+  3:
+    label: Aviso
+    action:
+      type: script
+      path: ../scripts/vision02-aviso.sh
+      interpreter: bash
+      args: ["Script executado pela Vision 02"]
+  4:
+    label: Nova aba
+    action:
+      type: hotkey
+      keys: [ctrl, shift, t]

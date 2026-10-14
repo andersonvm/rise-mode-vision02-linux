@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -75,7 +76,7 @@ def _text(value, context: str) -> str:
     return value
 
 
-def _action(data: dict, context: str) -> Action:
+def _action(data: dict, context: str, profile_directory: Path) -> Action:
     data = _mapping(data, context)
 
     action_type = data.get("type")
@@ -124,6 +125,53 @@ def _action(data: dict, context: str) -> Action:
             ) from exc
 
         return Action(type="url", url=url)
+
+    if action_type == "script":
+        _fields(data, {"type", "path", "interpreter", "args"}, context)
+        script_name = _text(data.get("path"), f"{context}.path")
+        script = Path(script_name).expanduser()
+        if not script.is_absolute():
+            script = profile_directory / script
+        script = script.resolve()
+        if not script.is_file():
+            raise ProfileValidationError(
+                f"{context}.path não encontrado: {script}"
+            )
+        interpreter = _text(data.get("interpreter"), f"{context}.interpreter")
+        if interpreter not in {"bash", "python3"}:
+            raise ProfileValidationError(
+                f"{context}.interpreter deve ser bash ou python3"
+            )
+        args = data.get("args", [])
+        if not isinstance(args, list) or not all(
+            isinstance(arg, str) and bool(arg) for arg in args
+        ):
+            raise ProfileValidationError(
+                f"{context}.args deve ser uma lista de strings não vazias"
+            )
+        return Action(
+            type="script",
+            script_path=script,
+            interpreter=interpreter,
+            argv=tuple(args),
+        )
+
+    if action_type == "hotkey":
+        _fields(data, {"type", "keys"}, context)
+        keys = data.get("keys")
+        if (
+            not isinstance(keys, list)
+            or not 1 <= len(keys) <= 5
+            or not all(
+                isinstance(key, str)
+                and re.fullmatch(r"[A-Za-z0-9_]+", key)
+                for key in keys
+            )
+        ):
+            raise ProfileValidationError(
+                f"{context}.keys deve conter de 1 a 5 nomes de teclas válidos"
+            )
+        return Action(type="hotkey", keys=tuple(keys))
 
     if action_type == "profile":
         _fields(data, {"type", "target"}, context)
@@ -197,6 +245,7 @@ def load_profile(path: str | Path) -> Profile:
         action = _action(
             config.get("action"),
             f"{context}.action",
+            path.parent,
         )
 
         image = None

@@ -155,6 +155,7 @@ class Vision02:
     def _write(self, data: bytes) -> None:
         if len(data) != REPORT_SIZE:
             raise ValueError("Relatório deve ter 512 bytes")
+        packet = b"\x00" + data
         with self._operation() as fd, self._write_lock:
             if self.faulted:
                 raise RuntimeError("Sessão HID em falha; execute reconnect()")
@@ -163,7 +164,7 @@ class Vision02:
             try:
                 while True:
                     try:
-                        written = os.write(fd, data)
+                        written = os.write(fd, packet)
                         break
 
                     except BlockingIOError:
@@ -183,10 +184,10 @@ class Vision02:
                                 "Timeout aguardando escrita HID"
                             )
 
-                if written != REPORT_SIZE:
+                if written != len(packet):
                     raise OSError(
                         f"Escrita HID incompleta: "
-                        f"{written}/{REPORT_SIZE}"
+                        f"{written}/{len(packet)}"
                     )
 
             except OSError as exc:

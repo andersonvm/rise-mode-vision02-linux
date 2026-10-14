@@ -12,6 +12,9 @@ class Action:
     argv: tuple[str, ...] = ()
     url: str | None = None
     target: str | None = None
+    script_path: Path | None = None
+    interpreter: str | None = None
+    keys: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)

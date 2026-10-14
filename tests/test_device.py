@@ -21,10 +21,10 @@ def test_successful_write(device):
     """Uma escrita completa não coloca a sessão em falha."""
     payload = bytes(REPORT_SIZE)
 
-    with patch("vision02.device.os.write", return_value=REPORT_SIZE) as write:
+    with patch("vision02.device.os.write", return_value=REPORT_SIZE + 1) as write:
         device._write(payload)
 
-    write.assert_called_once_with(100, payload)
+    write.assert_called_once_with(100, b"\x00" + (payload))
 
     assert device.faulted is False
     assert device.last_error is None

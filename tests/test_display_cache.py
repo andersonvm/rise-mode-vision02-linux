@@ -30,7 +30,7 @@ def transport():
         ),
         patch(
             "vision02.device.os.write",
-            return_value=REPORT_SIZE,
+            return_value=REPORT_SIZE + 1,
         ) as write,
     ):
         yield write
@@ -87,7 +87,7 @@ def test_cache_is_invalidated_on_transport_error(device):
         ),
         patch(
             "vision02.device.os.write",
-            side_effect=[REPORT_SIZE, error],
+            side_effect=[REPORT_SIZE + 1, error],
         ),
     ):
         with pytest.raises(OSError) as caught:

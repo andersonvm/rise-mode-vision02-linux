@@ -17,6 +17,7 @@ vision02 = "vision02.cli:main"
 where = ["src"]
 
 [project.optional-dependencies]
+wayland = ["dbus-next>=0.2.3,<1"]
 dev = [
     "pytest>=8",
     ]

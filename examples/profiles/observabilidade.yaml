@@ -1,0 +1,27 @@
+version: 1
+name: Observabilidade
+
+keys:
+  1:
+    label: Grafana
+    action:
+      type: url
+      url: http://localhost:3000
+
+  2:
+    label: Prometheus
+    action:
+      type: url
+      url: http://localhost:9090
+
+  3:
+    label: Kubernetes
+    action:
+      type: command
+      argv: [gnome-terminal]
+
+  15:
+    label: Desenvolv.
+    action:
+      type: profile
+      target: Desenvolvimento

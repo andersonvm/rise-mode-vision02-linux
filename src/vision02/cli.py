@@ -6,8 +6,16 @@ import argparse
 from pathlib import Path
 
 from .controller import Vision02Controller
+from .actions.executor import close_wayland_keyboard
 from .device import Vision02, find_device
-from .profiles import ProfileValidationError, load_profile
+from .profiles import (
+    ProfileManager,
+    ProfileManagerError,
+    ProfileValidationError,
+    load_profile,
+    validate_profile_targets,
+)
+from .switching import ProfileSwitcher
 from .rendering import render_profile
 from .protocol import physical_key_to_display_id
 
@@ -49,6 +57,15 @@ def build_parser() -> argparse.ArgumentParser:
         help="Executa um perfil na Vision 02",
     )
     run.add_argument("path", type=Path)
+    run.add_argument(
+        "--with",
+        dest="other_paths",
+        nargs="+",
+        type=Path,
+        default=[],
+        metavar="PROFILE",
+        help="Perfis adicionais disponíveis para alternância",
+    )
 
     return parser
 
@@ -65,16 +82,47 @@ def _print_profile(profile) -> None:
         )
 
 
-def _run_profile(profile) -> None:
+def _run_profile(manager: ProfileManager) -> None:
+    """Executa perfis em uma única sessão HID."""
+    profile = manager.active
     controller = Vision02Controller(profile)
 
+    # Teclas cujos eventos devem ser ignorados até a liberação.
+    blocked_keys: set[int] = set()
+
     with Vision02() as device:
+        def drain_events() -> None:
+            """Descarta eventos antigos sem bloquear indefinidamente."""
+            limit = 256
+
+            for _ in range(limit):
+                event = device.read_event(timeout=0)
+
+                if event is None:
+                    return
+
+                key_id, pressed = event
+
+                if pressed:
+                    blocked_keys.add(key_id)
+                else:
+                    blocked_keys.discard(key_id)
+
+            raise RuntimeError(
+                "Limite de eventos HID pendentes excedido"
+            )
+
+        switcher = ProfileSwitcher(
+            manager,
+            controller,
+            device,
+            drain_events=drain_events,
+        )
+
         try:
             controller.start()
 
-            images = render_profile(profile)
-
-            for key_id, image in images.items():
+            for key_id, image in render_profile(profile).items():
                 device.set_image(
                     physical_key_to_display_id(key_id),
                     image,
@@ -94,13 +142,47 @@ def _run_profile(profile) -> None:
                     continue
 
                 key_id, pressed = event
-                controller.handle_event(key_id, pressed)
+
+                if not pressed:
+                    blocked_keys.discard(key_id)
+                    controller.handle_event(key_id, False)
+                    continue
+
+                if key_id in blocked_keys:
+                    continue
+
+                active_profile = manager.active
+                config = active_profile.keys.get(key_id)
+
+                if (
+                    config is not None
+                    and config.action.type == "profile"
+                ):
+                    # A mesma pressão não pode produzir outra
+                    # troca após a atualização dos LCDs.
+                    blocked_keys.add(key_id)
+
+                    target = config.action.target
+                    changed = switcher.switch(target)
+
+                    if changed:
+                        print(
+                            f"Perfil ativo: {manager.active_name}",
+                            flush=True,
+                        )
+
+                    continue
+
+                controller.handle_event(key_id, True)
 
         except KeyboardInterrupt:
-            print("\nEncerrando perfil...", flush=True)
+            print("\\nEncerrando perfil...", flush=True)
 
         finally:
-            controller.stop()
+            try:
+                controller.stop()
+            finally:
+                close_wayland_keyboard()
 
 
 def main(argv=None) -> None:
@@ -126,16 +208,28 @@ def main(argv=None) -> None:
         return
 
     if args.action == "profile":
-        try:
-            profile = load_profile(args.path)
-        except (ProfileValidationError, OSError) as exc:
-            parser.error(f"Perfil inválido: {exc}")
-
         if args.profile_action == "validate":
+            try:
+                profile = load_profile(args.path)
+            except (ProfileValidationError, OSError) as exc:
+                parser.error(f"Perfil inválido: {exc}")
+
             _print_profile(profile)
             return
 
-        _run_profile(profile)
+        manager = ProfileManager()
+
+        try:
+            manager.load_many([args.path, *args.other_paths])
+            validate_profile_targets(manager)
+        except (
+            ProfileValidationError,
+            ProfileManagerError,
+            OSError,
+        ) as exc:
+            parser.error(f"Perfis inválidos: {exc}")
+
+        _run_profile(manager)
         return
 
     if args.action == "image" and not 1 <= args.id <= 15:
