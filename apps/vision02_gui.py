@@ -42,6 +42,10 @@ class Vision02Window(Adw.ApplicationWindow):
         self._refresh_button.set_tooltip_text("Atualizar estado")
         self._refresh_button.connect("clicked", lambda *_: self.refresh())
         header.pack_end(self._refresh_button)
+        self._editor_button = Gtk.Button(label="Editar teclas")
+        self._editor_button.set_tooltip_text("Editar perfis YAML com prévia local")
+        self._editor_button.connect("clicked", self._open_editor)
+        header.pack_start(self._editor_button)
         toolbar.add_top_bar(header)
         self.set_content(toolbar)
 
@@ -120,6 +124,16 @@ class Vision02Window(Adw.ApplicationWindow):
         except (OSError, subprocess.SubprocessError, ValueError, KeyError) as exc:
             self._preview_data = {}
             self.warning.set_text(f"Não foi possível gerar prévias locais: {exc}")
+
+    def _open_editor(self, *_):
+        """Abre processo GTK independente; não cria outra conexão HID."""
+        try:
+            subprocess.Popen(
+                [str(ROOT / "scripts" / "vision02-editor")],
+                cwd=str(ROOT), start_new_session=True,
+            )
+        except OSError as exc:
+            self.status_label.set_text(f"Não foi possível abrir editor: {exc}")
 
     def _on_close(self, *_):
         self._closed = True

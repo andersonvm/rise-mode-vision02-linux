@@ -8,6 +8,7 @@ from pathlib import Path
 
 from .controller import Vision02Controller
 from .control_ipc import ControlServer, request as ipc_request
+from .profile_reload import FatalReloadError, reload_profiles
 from .actions.executor import close_wayland_keyboard
 from .device import Vision02, find_device
 from .profiles import (
@@ -74,6 +75,7 @@ def build_parser() -> argparse.ArgumentParser:
     control_sub = control.add_subparsers(dest="control_action", required=True)
     control_sub.add_parser("status", help="Estado e perfil ativo")
     control_sub.add_parser("profiles", help="Perfis disponíveis")
+    control_sub.add_parser("reload", help="Recarrega os YAML sem reiniciar HID")
     control_switch = control_sub.add_parser("switch", help="Ativa um perfil existente")
     control_switch.add_argument("target", help="Nome exato do perfil")
 
@@ -92,7 +94,10 @@ def _print_profile(profile) -> None:
         )
 
 
-def _run_profile(manager: ProfileManager, *, ipc: bool = False) -> None:
+def _run_profile(
+    manager: ProfileManager, *, ipc: bool = False,
+    profile_paths: tuple[Path, ...] = (),
+) -> None:
     """Executa perfis em uma única sessão HID."""
     profile = manager.active
     controller = Vision02Controller(profile)
@@ -130,8 +135,10 @@ def _run_profile(manager: ProfileManager, *, ipc: bool = False) -> None:
         )
 
         control_server: ControlServer | None = None
+        reload_fatal: FatalReloadError | None = None
 
         def handle_control(command: str, target: str | None) -> dict:
+            nonlocal manager, reload_fatal
             if command == "status":
                 return {
                     "connected": True,
@@ -140,6 +147,21 @@ def _run_profile(manager: ProfileManager, *, ipc: bool = False) -> None:
                 }
             if command == "profiles":
                 return {"profiles": list(manager.list_profiles())}
+            if command == "reload":
+                if not profile_paths:
+                    raise ValueError("Caminhos dos perfis não configurados para reload")
+                try:
+                    updated = reload_profiles(
+                        manager, profile_paths, controller, device, drain_events
+                    )
+                except FatalReloadError as exc:
+                    reload_fatal = exc
+                    raise
+                manager = updated
+                switcher.manager = updated
+                print(f"Perfis recarregados: {manager.active_name}", flush=True)
+                return {"active": manager.active_name,
+                        "profiles": list(manager.list_profiles()), "reloaded": True}
             if command == "switch" and target is not None:
                 changed = switcher.switch(target)
                 if changed:
@@ -170,6 +192,10 @@ def _run_profile(manager: ProfileManager, *, ipc: bool = False) -> None:
             while True:
                 if control_server is not None:
                     control_server.process_pending(handle_control)
+                    if reload_fatal is not None:
+                        raise RuntimeError(
+                            "Falha na atualização dos LCDs; reiniciando sessão HID"
+                        ) from reload_fatal
                 event = device.read_event(timeout=0.2)
 
                 if event is None:
@@ -279,7 +305,10 @@ def main(argv=None) -> None:
             parser.error(f"Perfis inválidos: {exc}")
 
         if args.ipc:
-            _run_profile(manager, ipc=True)
+            _run_profile(
+                manager, ipc=True,
+                profile_paths=tuple([args.path, *args.other_paths]),
+            )
         else:
             _run_profile(manager)
         return

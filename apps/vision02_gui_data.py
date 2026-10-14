@@ -18,6 +18,7 @@ from PIL import Image
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from vision02.profiles import load_profile
+from vision02.user_profiles import default_profile_paths
 from vision02.protocol import physical_key_to_display_id
 from vision02.rendering import render_profile
 
@@ -90,7 +91,7 @@ def main(argv=None) -> None:
     parser.add_argument("--profile", action="append", default=None)
     parser.add_argument("--cache", type=Path)
     args = parser.parse_args(argv)
-    paths = args.profile if args.profile is not None else DEFAULT_PROFILES
+    paths = args.profile if args.profile is not None else default_profile_paths(args.project)
     result = build_metadata(args.project, paths, cache=args.cache)
     print(json.dumps(result, ensure_ascii=False))
 
