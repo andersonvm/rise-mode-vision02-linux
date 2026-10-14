@@ -20,6 +20,8 @@ from .profiles import (
 )
 from .switching import ProfileSwitcher
 from .rendering import render_profile
+from .user_profiles import default_profile_paths
+from .profile_catalog import choose_initial, write_last_active
 from .protocol import physical_key_to_display_id
 
 
@@ -59,7 +61,8 @@ def build_parser() -> argparse.ArgumentParser:
         "run",
         help="Executa um perfil na Vision 02",
     )
-    run.add_argument("path", type=Path)
+    run.add_argument("path", type=Path, nargs="?")
+    run.add_argument("--catalog", action="store_true", help="Carrega todos os YAML pessoais e restaura perfil ativo")
     run.add_argument("--ipc", action="store_true", help="Habilita controle local para GUI e CLI")
     run.add_argument(
         "--with",
@@ -96,7 +99,7 @@ def _print_profile(profile) -> None:
 
 def _run_profile(
     manager: ProfileManager, *, ipc: bool = False,
-    profile_paths: tuple[Path, ...] = (),
+    profile_paths: tuple[Path, ...] = (), catalog: bool = False,
 ) -> None:
     """Executa perfis em uma única sessão HID."""
     profile = manager.active
@@ -138,7 +141,7 @@ def _run_profile(
         reload_fatal: FatalReloadError | None = None
 
         def handle_control(command: str, target: str | None) -> dict:
-            nonlocal manager, reload_fatal
+            nonlocal manager, reload_fatal, profile_paths
             if command == "status":
                 return {
                     "connected": True,
@@ -148,6 +151,8 @@ def _run_profile(
             if command == "profiles":
                 return {"profiles": list(manager.list_profiles())}
             if command == "reload":
+                if catalog:
+                    profile_paths = default_profile_paths(Path.cwd())
                 if not profile_paths:
                     raise ValueError("Caminhos dos perfis não configurados para reload")
                 try:
@@ -166,8 +171,16 @@ def _run_profile(
                 changed = switcher.switch(target)
                 if changed:
                     print(f"Perfil ativo: {manager.active_name}", flush=True)
+                    remember_active()
                 return {"active": manager.active_name, "changed": changed}
             raise ValueError("Comando IPC desconhecido")
+
+        def remember_active() -> None:
+            if catalog and manager.active_name is not None:
+                try:
+                    write_last_active(manager.active_name)
+                except (OSError, ValueError) as exc:
+                    print(f"[Vision02] Não foi possível persistir perfil: {exc}", flush=True)
 
         try:
             controller.start()
@@ -230,6 +243,7 @@ def _run_profile(
                             f"Perfil ativo: {manager.active_name}",
                             flush=True,
                         )
+                        remember_active()
 
                     continue
 
@@ -292,11 +306,22 @@ def main(argv=None) -> None:
             _print_profile(profile)
             return
 
+        if args.catalog:
+            if args.path is not None or args.other_paths:
+                parser.error("--catalog não pode ser combinado com caminhos explícitos")
+            paths = default_profile_paths(Path.cwd())
+        else:
+            if args.path is None:
+                parser.error("Informe o caminho do perfil ou use --catalog")
+            paths = tuple([args.path, *args.other_paths])
+
         manager = ProfileManager()
 
         try:
-            manager.load_many([args.path, *args.other_paths])
+            manager.load_many(paths)
             validate_profile_targets(manager)
+            if args.catalog:
+                manager.switch(choose_initial(manager.list_profiles()))
         except (
             ProfileValidationError,
             ProfileManagerError,
@@ -307,10 +332,10 @@ def main(argv=None) -> None:
         if args.ipc:
             _run_profile(
                 manager, ipc=True,
-                profile_paths=tuple([args.path, *args.other_paths]),
+                profile_paths=tuple(paths), catalog=args.catalog,
             )
         else:
-            _run_profile(manager)
+            _run_profile(manager, catalog=args.catalog)
         return
 
     if args.action == "image" and not 1 <= args.id <= 15:

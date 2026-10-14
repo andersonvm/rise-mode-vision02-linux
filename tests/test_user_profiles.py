@@ -26,13 +26,13 @@ def test_falls_back_to_examples_without_personal_profiles(tmp_path, monkeypatch)
     )
 
 
-def test_incomplete_personal_configuration_fails_safe(tmp_path, monkeypatch):
+def test_single_personal_profile_is_supported(tmp_path, monkeypatch):
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "conf"))
     folder = config_profile_dir()
     folder.mkdir(parents=True)
-    (folder / "desenvolvimento.yaml").write_text("existe")
-    with pytest.raises(ValueError, match="incompleta"):
-        default_profile_paths(tmp_path)
+    only = folder / "desenvolvimento.yaml"
+    only.write_text("version: 1\nname: Desenvolvimento\nkeys: {}\n")
+    assert default_profile_paths(tmp_path) == (only,)
 
 
 def test_editor_and_preview_use_shared_user_profile_resolver():

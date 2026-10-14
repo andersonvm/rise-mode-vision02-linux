@@ -88,6 +88,13 @@ class EditorWindow(Adw.ApplicationWindow):
         self.profile_combo = Gtk.DropDown.new_from_strings(self.profile_names)
         self.profile_combo.connect("notify::selected", self._on_profile_changed)
         top.append(self.profile_combo)
+        profiles_btn = Gtk.Button(label="Gerenciar perfis")
+        profiles_btn.connect("clicked", self._open_profiles)
+        top.append(profiles_btn)
+        reload_list = Gtk.Button(icon_name="view-refresh-symbolic")
+        reload_list.set_tooltip_text("Atualizar lista de perfis")
+        reload_list.connect("clicked", self._refresh_profiles)
+        top.append(reload_list)
         root.append(top)
 
         columns = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=20)
@@ -178,6 +185,32 @@ class EditorWindow(Adw.ApplicationWindow):
 
         self._load_profile()
         self._syncing = False
+
+    def _open_profiles(self, *_):
+        try:
+            subprocess.Popen([str(ROOT / "scripts/vision02-profiles")], cwd=str(ROOT), start_new_session=True)
+        except OSError as exc:
+            self.status.set_text(f"Falha ao abrir gerenciador: {exc}")
+
+    def _refresh_profiles(self, *_):
+        if self.busy or self.dirty:
+            self.status.set_text("Salve ou descarte a edição antes de atualizar a lista.")
+            return
+        try:
+            names = backend("list")["profiles"]
+            if not names:
+                raise ValueError("Nenhum perfil disponível")
+            self._syncing = True
+            self.profile_names = names
+            if self.profile_name not in names:
+                self.profile_name = names[0]
+            self.profile_combo.set_model(Gtk.StringList.new(names))
+            self.profile_combo.set_selected(names.index(self.profile_name))
+            self._syncing = False
+            self._load_profile()
+        except (OSError, RuntimeError, ValueError) as exc:
+            self._syncing = False
+            self.status.set_text(f"Falha ao atualizar perfis: {exc}")
 
     def _entry(self, parent, label):
         group = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=3)

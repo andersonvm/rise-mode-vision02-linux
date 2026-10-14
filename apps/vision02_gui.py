@@ -40,12 +40,15 @@ class Vision02Window(Adw.ApplicationWindow):
         header = Adw.HeaderBar()
         self._refresh_button = Gtk.Button(icon_name="view-refresh-symbolic")
         self._refresh_button.set_tooltip_text("Atualizar estado")
-        self._refresh_button.connect("clicked", lambda *_: self.refresh())
+        self._refresh_button.connect("clicked", lambda *_: self._refresh_all())
         header.pack_end(self._refresh_button)
         self._editor_button = Gtk.Button(label="Editar teclas")
         self._editor_button.set_tooltip_text("Editar perfis YAML com prévia local")
         self._editor_button.connect("clicked", self._open_editor)
         header.pack_start(self._editor_button)
+        self._profiles_button = Gtk.Button(label="Gerenciar perfis")
+        self._profiles_button.connect("clicked", self._open_profiles)
+        header.pack_start(self._profiles_button)
         toolbar.add_top_bar(header)
         self.set_content(toolbar)
 
@@ -135,6 +138,15 @@ class Vision02Window(Adw.ApplicationWindow):
         except OSError as exc:
             self.status_label.set_text(f"Não foi possível abrir editor: {exc}")
 
+    def _open_profiles(self, *_):
+        try:
+            subprocess.Popen(
+                [str(ROOT / "scripts" / "vision02-profiles")],
+                cwd=str(ROOT), start_new_session=True,
+            )
+        except OSError as exc:
+            self.status_label.set_text(f"Não foi possível abrir gerenciador: {exc}")
+
     def _on_close(self, *_):
         self._closed = True
         if self._poll_source:
@@ -148,6 +160,10 @@ class Vision02Window(Adw.ApplicationWindow):
         if not self._pending:
             self.refresh()
         return True
+
+    def _refresh_all(self):
+        self._load_previews()
+        self.refresh()
 
     def refresh(self):
         self._send("status")
@@ -184,7 +200,10 @@ class Vision02Window(Adw.ApplicationWindow):
 
         self._connected = bool(response.get("connected", True))
         if command == "status":
-            self._profile_names = list(response.get("profiles", []))
+            discovered = list(response.get("profiles", []))
+            if set(discovered) != set(self._profile_names):
+                self._load_previews()
+            self._profile_names = discovered
             active = response.get("active", "")
         elif command == "switch":
             active = response.get("active", "")

@@ -188,14 +188,25 @@ def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(
         description="Inicia/reconecta automaticamente Vision 02 via hidraw"
     )
-    parser.add_argument("profile", type=Path)
+    parser.add_argument("profile", type=Path, nargs="?")
+    parser.add_argument("--catalog", action="store_true", help="Descobre os perfis pessoais dinamicamente")
     parser.add_argument("--with", dest="other_profiles", type=Path, nargs="+", default=[])
     parser.add_argument("--interval", type=float, default=1.0)
     parser.add_argument("--max-retry", type=float, default=60.0)
     args = parser.parse_args(argv)
 
+    if args.catalog:
+        if args.profile is not None or args.other_profiles:
+            parser.error("--catalog não aceita caminhos explícitos")
+        from .user_profiles import default_profile_paths
+        requested_paths = list(default_profile_paths(Path.cwd()))
+    else:
+        if args.profile is None:
+            parser.error("Informe um perfil ou use --catalog")
+        requested_paths = [args.profile, *args.other_profiles]
+
     try:
-        profiles = validate_profiles([args.profile, *args.other_profiles])
+        profiles = validate_profiles(requested_paths)
     except (OSError, ValueError, RuntimeError) as exc:
         parser.error(f"Perfis inválidos: {exc}")
     except Exception as exc:
@@ -203,9 +214,13 @@ def main(argv: list[str] | None = None) -> None:
         # importing implementation details into the supervisor loop.
         parser.error(f"Não foi possível validar perfis: {exc}")
 
-    command = [sys.executable, "-m", "vision02.cli", "profile", "run", str(profiles[0])]
-    if len(profiles) > 1:
-        command.extend(["--with", *(str(p) for p in profiles[1:])])
+    command = [sys.executable, "-m", "vision02.cli", "profile", "run"]
+    if args.catalog:
+        command.append("--catalog")
+    else:
+        command.append(str(profiles[0]))
+        if len(profiles) > 1:
+            command.extend(["--with", *(str(p) for p in profiles[1:])])
 
     # O filho é o único dono do HID e publica o socket local da interface.
     command.append("--ipc")
