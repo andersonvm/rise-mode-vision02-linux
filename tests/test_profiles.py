@@ -238,3 +238,68 @@ keys: {}
 
     with pytest.raises(ProfileValidationError, match="version"):
         load_profile(path)
+
+
+def test_profile_switch_action(tmp_path):
+    path = write_profile(
+        tmp_path,
+        """
+version: 1
+name: Desenvolvimento
+keys:
+  15:
+    label: Observabilidade
+    action:
+      type: profile
+      target: Observabilidade
+""",
+    )
+
+    profile = load_profile(path)
+    action = profile.keys[15].action
+
+    assert action.type == "profile"
+    assert action.target == "Observabilidade"
+
+
+@pytest.mark.parametrize(
+    "target",
+    ["", "   "],
+)
+def test_empty_profile_target_rejected(tmp_path, target):
+    path = write_profile(
+        tmp_path,
+        f"""
+version: 1
+name: Desenvolvimento
+keys:
+  15:
+    label: Trocar
+    action:
+      type: profile
+      target: "{target}"
+""",
+    )
+
+    with pytest.raises(ProfileValidationError, match="target"):
+        load_profile(path)
+
+
+def test_unknown_profile_action_field_rejected(tmp_path):
+    path = write_profile(
+        tmp_path,
+        """
+version: 1
+name: Desenvolvimento
+keys:
+  15:
+    label: Trocar
+    action:
+      type: profile
+      target: Observabilidade
+      command: echo
+""",
+    )
+
+    with pytest.raises(ProfileValidationError, match="desconhecidos"):
+        load_profile(path)

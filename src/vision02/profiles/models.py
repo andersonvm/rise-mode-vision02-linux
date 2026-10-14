@@ -11,6 +11,7 @@ class Action:
     type: str
     argv: tuple[str, ...] = ()
     url: str | None = None
+    target: str | None = None
 
 
 @dataclass(frozen=True)

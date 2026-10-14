@@ -125,6 +125,16 @@ def _action(data: dict, context: str) -> Action:
 
         return Action(type="url", url=url)
 
+    if action_type == "profile":
+        _fields(data, {"type", "target"}, context)
+
+        target = _text(
+            data.get("target"),
+            f"{context}.target",
+        )
+
+        return Action(type="profile", target=target)
+
     raise ProfileValidationError(
         f"{context}.type desconhecido: {action_type!r}"
     )
