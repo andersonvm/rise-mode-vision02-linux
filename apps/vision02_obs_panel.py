@@ -110,6 +110,9 @@ class OBSPanel(Adw.ApplicationWindow):
         self.batch_btn.connect('clicked', self._open_scene_batch)
         root.append(self.batch_btn)
         self._batch_window = None
+        self.multi_profiles_btn = Gtk.Button(label='Criar perfis OBS: Controle / Cenas / Áudio…')
+        self.multi_profiles_btn.connect('clicked', self._open_multi_profiles)
+        root.append(self.multi_profiles_btn)
 
         choice = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
         choice.append(Gtk.Label(label='Tecla física OBS:'))
@@ -174,6 +177,14 @@ class OBSPanel(Adw.ApplicationWindow):
         self._load_profile()
         self._work('discover')
         self._syncing = False
+
+    def _open_multi_profiles(self, *_):
+        # Processo GTK independente: mantém o painel principal responsivo.
+        launcher = ROOT / 'scripts/vision02-obs-profiles'
+        try:
+            subprocess.Popen([str(launcher)], cwd=ROOT, start_new_session=True)
+        except OSError as exc:
+            self.status.set_text(f'Falha ao abrir gerenciador de perfis OBS: {exc}')
 
     def _open_scene_batch(self, *_):
         if self.busy or self.dirty:

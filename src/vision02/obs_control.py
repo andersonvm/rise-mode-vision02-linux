@@ -36,11 +36,19 @@ class OBSSnapshot:
     desktop_muted: bool | None = None
     scene: str | None = None
     scenes: tuple[str, ...] = ()
+    input_mutes: tuple[tuple[str, bool], ...] = ()
 
 
 def _bool_response(connection, request, field):
     try:
         return connection.call(request).get(field)
+    except OBSError:
+        return None
+
+
+def _bool_response_input(connection, name: str) -> bool | None:
+    try:
+        return connection.call('GetInputMute', {'inputName': name}).get('inputMuted')
     except OBSError:
         return None
 
@@ -63,7 +71,22 @@ def collect_snapshot(connection, config: dict) -> OBSSnapshot:
             return connection.call('GetInputMute', {'inputName': input_name}).get('inputMuted')
         except OBSError:
             return None
+    # Consulta apenas um conjunto limitado de fontes para preservar a latência.
+    # Fontes que não suportam mute são ignoradas, sem derrubar a sessão OBS.
+    input_mutes = []
+    try:
+        inputs = connection.call('GetInputList').get('inputs', [])
+        for row in inputs[:32]:
+            name = row.get('inputName') if isinstance(row, dict) else None
+            if not isinstance(name, str) or not name:
+                continue
+            muted = _bool_response_input(connection, name)
+            if isinstance(muted, bool):
+                input_mutes.append((name, muted))
+    except (OBSError, KeyError, TypeError, ValueError):
+        pass
     return OBSSnapshot(
+        input_mutes=tuple(input_mutes),
         connected=True, recording=record.get('outputActive'), paused=record.get('outputPaused'),
         streaming=stream, virtualcam=cam, replay=replay,
         mic_muted=mute(mic), desktop_muted=mute(desktop),
@@ -240,8 +263,6 @@ class OBSWorker:
 
 
 def obs_mapping(profile) -> dict[int, Action]:
-    if profile.name != 'OBS Studio':
-        return {}
     return {k: cfg.action for k, cfg in profile.keys.items()
             if cfg.action.type == 'obs' and cfg.appearance is None}
 
@@ -324,6 +345,10 @@ def obs_image(action: Action, snapshot: OBSSnapshot, *, duplicate: bool = False)
         yes, no = 'ATIVA', 'INATIVA'
     elif op in labels:
         title, active, yes, no = labels[op]
+        if op in ('toggle_mic', 'toggle_desktop') and action.obs_source:
+            muted = dict(snapshot.input_mutes).get(action.obs_source)
+            active = (not muted) if isinstance(muted, bool) else None
+            title = _scene_title(action.obs_source)
         if op == 'toggle_pause' and snapshot.recording is False:
             active = None
     else:
