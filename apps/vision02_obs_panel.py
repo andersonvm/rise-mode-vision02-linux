@@ -113,6 +113,9 @@ class OBSPanel(Adw.ApplicationWindow):
         self.multi_profiles_btn = Gtk.Button(label='Criar perfis OBS: Controle / Cenas / Áudio…')
         self.multi_profiles_btn.connect('clicked', self._open_multi_profiles)
         root.append(self.multi_profiles_btn)
+        self.visual_btn = Gtk.Button(label='Editor visual de cenas e áudio…')
+        self.visual_btn.connect('clicked', self._open_visual)
+        root.append(self.visual_btn)
 
         choice = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
         choice.append(Gtk.Label(label='Tecla física OBS:'))
@@ -177,6 +180,13 @@ class OBSPanel(Adw.ApplicationWindow):
         self._load_profile()
         self._work('discover')
         self._syncing = False
+
+    def _open_visual(self, *_):
+        launcher = ROOT / 'scripts/vision02-obs-visual'
+        try:
+            subprocess.Popen([str(launcher)], cwd=ROOT, start_new_session=True)
+        except OSError as exc:
+            self.status.set_text(f'Falha ao abrir editor OBS visual: {exc}')
 
     def _open_multi_profiles(self, *_):
         # Processo GTK independente: mantém o painel principal responsivo.
