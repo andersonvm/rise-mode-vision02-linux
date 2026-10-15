@@ -20,6 +20,7 @@ from .profiles import (
 )
 from .switching import ProfileSwitcher
 from .rendering import render_profile
+from .system_dashboard import Dashboard, MetricsWorker
 from .user_profiles import default_profile_paths
 from .profile_catalog import choose_initial, write_last_active
 from .protocol import physical_key_to_display_id
@@ -104,6 +105,8 @@ def _run_profile(
     """Executa perfis em uma única sessão HID."""
     profile = manager.active
     controller = Vision02Controller(profile)
+    metrics_worker = MetricsWorker()
+    dashboard = Dashboard(metrics_worker)
 
     # Teclas cujos eventos devem ser ignorados até a liberação.
     blocked_keys: set[int] = set()
@@ -164,12 +167,14 @@ def _run_profile(
                     raise
                 manager = updated
                 switcher.manager = updated
+                dashboard.invalidate()
                 print(f"Perfis recarregados: {manager.active_name}", flush=True)
                 return {"active": manager.active_name,
                         "profiles": list(manager.list_profiles()), "reloaded": True}
             if command == "switch" and target is not None:
                 changed = switcher.switch(target)
                 if changed:
+                    dashboard.invalidate()
                     print(f"Perfil ativo: {manager.active_name}", flush=True)
                     remember_active()
                 return {"active": manager.active_name, "changed": changed}
@@ -184,6 +189,7 @@ def _run_profile(
 
         try:
             controller.start()
+            metrics_worker.start()
 
             for key_id, image in render_profile(profile).items():
                 device.set_image(
@@ -209,6 +215,8 @@ def _run_profile(
                         raise RuntimeError(
                             "Falha na atualização dos LCDs; reiniciando sessão HID"
                         ) from reload_fatal
+                # Atualização de UM LCD por passagem, na thread proprietária HID.
+                dashboard.tick(manager.active, device)
                 event = device.read_event(timeout=0.2)
 
                 if event is None:
@@ -239,6 +247,7 @@ def _run_profile(
                     changed = switcher.switch(target)
 
                     if changed:
+                        dashboard.invalidate()
                         print(
                             f"Perfil ativo: {manager.active_name}",
                             flush=True,
@@ -253,6 +262,7 @@ def _run_profile(
             print("\\nEncerrando perfil...", flush=True)
 
         finally:
+            metrics_worker.close()
             if control_server is not None:
                 control_server.close()
             try:
