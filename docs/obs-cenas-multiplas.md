@@ -22,7 +22,7 @@ As ações permanecem nos perfis pessoais em `~/.config/vision02/profiles/obs-st
 
 ## Nomes e limite físico
 
-- **OBS Studio**: pode conter quantas cenas o OBS suportar. 
+- **OBS Studio**: pode conter quantas cenas o OBS suportar.
 - **Vision 02**: tem 15 teclas; o painel permite atribuir cenas por nome às teclas **01–14**, reservando a tecla 15 para voltar.
 - Ao salvar, o backend valida unicidade das teclas e cenas; os cinco vínculos são gravados juntos com backup, validação YAML e verificação SHA-256 de concorrência.
 - O método legado `scene_slot` continua aceito nos YAML antigos, mas seu significado pode mudar com a ordem devolvida pelo OBS. Prefira `scene_name` para todos os vínculos.
