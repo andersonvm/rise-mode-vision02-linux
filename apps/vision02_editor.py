@@ -22,8 +22,8 @@ gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
 from gi.repository import Adw, Gdk, Gio, GLib, Gtk, Pango
 
-KINDS = ("none", "command", "url", "script", "hotkey", "profile")
-KIND_LABELS = ("Sem ação", "Comando", "URL", "Script", "Atalho", "Trocar perfil")
+KINDS = ("none", "command", "url", "script", "hotkey", "profile", "obs")
+KIND_LABELS = ("Sem ação", "Comando", "URL", "Script", "Atalho", "Trocar perfil", "OBS WebSocket")
 
 
 def backend(command, profile=None, payload=None, timeout=20):
@@ -316,6 +316,9 @@ class EditorWindow(Adw.ApplicationWindow):
             ("args", "Argumentos do script"),
             ("keys", "Atalho (ex.: ctrl, shift, t)"),
             ("target", "Nome do perfil de destino"),
+            ("operation", "OBS: operação (ex.: toggle_record, scene_slot)"),
+            ("slot", "OBS: número da cena, de 1 a 3"),
+            ("input", "OBS: nome da entrada de áudio (opcional)"),
         ]
         self.action_rows = {}
         for key, label in spec:
@@ -543,6 +546,7 @@ class EditorWindow(Adw.ApplicationWindow):
             "script": {"path", "args"},
             "hotkey": {"keys"},
             "profile": {"target"},
+            "obs": {"operation", "slot", "input"},
         }.get(kind, set())
         for field, row in self.action_rows.items():
             row.set_visible(field in showing)
@@ -675,6 +679,9 @@ class EditorWindow(Adw.ApplicationWindow):
             self.entries["args"].set_text(shlex.join(action.get("args", [])))
             self.entries["keys"].set_text(", ".join(action.get("keys", [])))
             self.entries["target"].set_text(action.get("target", "") or "")
+            self.entries["operation"].set_text(action.get("operation", "") or "")
+            self.entries["slot"].set_text(str(action.get("slot") or ""))
+            self.entries["input"].set_text(action.get("input", "") or "")
             self.interpreter.set_selected(0 if action.get("interpreter", "bash") == "bash" else 1)
             self.kind_combo.set_selected(KINDS.index(kind))
             self._change_kind()
@@ -698,6 +705,14 @@ class EditorWindow(Adw.ApplicationWindow):
             action["keys"] = [x for x in re.split(r"[\s,;+]+", self.entries["keys"].get_text()) if x]
         elif kind == "profile":
             action["target"] = self.entries["target"].get_text().strip()
+        elif kind == "obs":
+            action["operation"] = self.entries["operation"].get_text().strip()
+            raw_slot = self.entries["slot"].get_text().strip()
+            if raw_slot:
+                action["slot"] = int(raw_slot)
+            raw_input = self.entries["input"].get_text().strip()
+            if raw_input:
+                action["input"] = raw_input
         return {"label": self.entries["label"].get_text(),
                 "image": self.entries["image"].get_text(), "action": action,
                 "appearance": self._style_payload()}

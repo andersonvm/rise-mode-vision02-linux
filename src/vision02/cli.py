@@ -7,6 +7,8 @@ import json
 from pathlib import Path
 
 from .controller import Vision02Controller
+from .actions.executor import execute_action
+from .obs_control import OBSWorker
 from .control_ipc import ControlServer, request as ipc_request
 from .profile_reload import FatalReloadError, reload_profiles
 from .actions.executor import close_wayland_keyboard
@@ -105,10 +107,16 @@ def _run_profile(
 ) -> None:
     """Executa perfis em uma única sessão HID."""
     profile = manager.active
-    controller = Vision02Controller(profile)
+    obs_worker = OBSWorker()
+    def dispatch_action(action):
+        if action.type == 'obs':
+            obs_worker.submit(action)
+        else:
+            execute_action(action)
+    controller = Vision02Controller(profile, executor=dispatch_action)
     metrics_worker = MetricsWorker()
     status_worker = StatusWorker()
-    dashboard = Dashboard(metrics_worker, status_worker=status_worker)
+    dashboard = Dashboard(metrics_worker, status_worker=status_worker, obs_worker=obs_worker)
 
     # Teclas cujos eventos devem ser ignorados até a liberação.
     blocked_keys: set[int] = set()
@@ -193,6 +201,7 @@ def _run_profile(
             controller.start()
             metrics_worker.start()
             status_worker.start()
+            obs_worker.start()
 
             for key_id, image in render_profile(profile).items():
                 device.set_image(
@@ -265,6 +274,7 @@ def _run_profile(
             print("\\nEncerrando perfil...", flush=True)
 
         finally:
+            obs_worker.close()
             status_worker.close()
             metrics_worker.close()
             if control_server is not None:

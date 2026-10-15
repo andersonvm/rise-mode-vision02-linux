@@ -15,6 +15,9 @@ class Action:
     script_path: Path | None = None
     interpreter: str | None = None
     keys: tuple[str, ...] = ()
+    obs_operation: str | None = None
+    obs_slot: int | None = None
+    obs_source: str | None = None
 
 
 @dataclass(frozen=True)

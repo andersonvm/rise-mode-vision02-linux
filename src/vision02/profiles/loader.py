@@ -173,6 +173,27 @@ def _action(data: dict, context: str, profile_directory: Path) -> Action:
             )
         return Action(type="hotkey", keys=tuple(keys))
 
+    if action_type == "obs":
+        from vision02.obs_control import OBS_OPERATIONS
+        _fields(data, {"type", "operation", "slot", "input"}, context)
+        operation = data.get("operation")
+        if not isinstance(operation, str) or operation not in OBS_OPERATIONS:
+            raise ProfileValidationError(f"{context}.operation: comando OBS inválido")
+        slot = data.get("slot")
+        if operation == "scene_slot":
+            if type(slot) is not int or not 1 <= slot <= 3:
+                raise ProfileValidationError(f"{context}.slot deve ser 1, 2 ou 3")
+        elif slot is not None:
+            raise ProfileValidationError(f"{context}.slot só é permitido em scene_slot")
+        source = data.get("input")
+        if source is not None:
+            if operation not in ("toggle_mic", "toggle_desktop"):
+                raise ProfileValidationError(f"{context}.input só é permitido para áudio")
+            source = _text(source, f"{context}.input")
+            if len(source) > 128:
+                raise ProfileValidationError(f"{context}.input muito longo")
+        return Action(type="obs", obs_operation=operation, obs_slot=slot, obs_source=source)
+
     if action_type == "profile":
         _fields(data, {"type", "target"}, context)
 

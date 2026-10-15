@@ -18,6 +18,7 @@ from PIL import Image, ImageDraw, ImageFont
 
 from .protocol import physical_key_to_display_id
 from .system_status import StatusWorker, status_mapping, status_image
+from .obs_control import OBSWorker, obs_mapping, obs_image
 
 
 METRIC_LABELS = {
@@ -318,11 +319,13 @@ class Dashboard:
     def __init__(
         self, worker: MetricsWorker, *, minimum_gap: float = 0.20,
         status_worker: StatusWorker | None = None,
+        obs_worker: OBSWorker | None = None,
     ):
         if minimum_gap < 0.0:
             raise ValueError('minimum_gap negativo')
         self.worker = worker
         self.status_worker = status_worker
+        self.obs_worker = obs_worker
         self.minimum_gap = minimum_gap
         self._active: str | None = None
         self._revision = -1
@@ -330,6 +333,8 @@ class Dashboard:
         self._status_waiting: deque[tuple[int, Image.Image]] = deque()
         self._status_revision = -1
         self._next_status = False
+        self._obs_revision = -1
+        self._obs_waiting: deque[tuple[int, Image.Image]] = deque()
         self._last_write = -float('inf')
 
     @staticmethod
@@ -352,6 +357,8 @@ class Dashboard:
         self._status_revision = -1
         self._status_waiting.clear()
         self._next_status = False
+        self._obs_revision = -1
+        self._obs_waiting.clear()
 
     def tick(self, profile, device, *, now: float | None = None) -> bool:
         """No máximo UMA transmissão potencial por passagem e intervalo global.
@@ -362,7 +369,8 @@ class Dashboard:
         now = time.monotonic() if now is None else now
         metrics = self.mapping(profile)
         status = status_mapping(profile) if self.status_worker is not None else {}
-        if not metrics and not status:
+        obs = obs_mapping(profile) if self.obs_worker is not None else {}
+        if not metrics and not status and not obs:
             self.invalidate()
             return False
         if profile.name != self._active:
@@ -386,9 +394,20 @@ class Dashboard:
                     for key, category in status.items()
                 )
 
+        if obs and self.obs_worker is not None:
+            revision, snapshot = self.obs_worker.latest()
+            if revision != self._obs_revision:
+                self._obs_revision = revision
+                self._obs_waiting = deque(
+                    (key, obs_image(action, snapshot))
+                    for key, action in obs.items()
+                )
+
         if now - self._last_write < self.minimum_gap:
             return False
-        if self._status_waiting and (self._next_status or not self._waiting):
+        if self._obs_waiting:
+            key, image = self._obs_waiting.popleft()
+        elif self._status_waiting and (self._next_status or not self._waiting):
             key, image = self._status_waiting.popleft()
             self._next_status = False
         elif self._waiting:

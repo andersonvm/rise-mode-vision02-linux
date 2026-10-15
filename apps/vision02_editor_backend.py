@@ -73,6 +73,12 @@ def _action_dict(action) -> dict:
         result["keys"] = list(action.keys)
     elif action.type == "profile":
         result["target"] = action.target
+    elif action.type == "obs":
+        result["operation"] = action.obs_operation
+        if action.obs_slot is not None:
+            result["slot"] = action.obs_slot
+        if action.obs_source is not None:
+            result["input"] = action.obs_source
     return result
 
 
@@ -105,6 +111,12 @@ def _action_payload(action: dict, other_profiles: set[str]) -> dict | None:
                   "interpreter": action.get("interpreter"), "args": action.get("args", [])}
     elif kind == "hotkey":
         result = {"type": kind, "keys": action.get("keys")}
+    elif kind == "obs":
+        result = {"type": kind, "operation": action.get("operation")}
+        if action.get("slot") is not None:
+            result["slot"] = action["slot"]
+        if action.get("input"):
+            result["input"] = action["input"]
     elif kind == "profile":
         target = action.get("target")
         if target not in other_profiles:
