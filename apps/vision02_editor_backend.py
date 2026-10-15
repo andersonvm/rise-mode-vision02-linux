@@ -15,15 +15,16 @@ import tempfile
 from datetime import datetime, timezone
 
 import yaml
-from PIL import Image
+from PIL import Image, ImageOps
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-from vision02.profiles import load_profile
+from vision02.profiles import Action, KeyConfig, load_profile
+from vision02.profiles.loader import parse_appearance
 from vision02.icon_library import list_icons, import_icon
 from vision02.user_profiles import default_profile_paths
-from vision02.rendering import render_profile
+from vision02.rendering import render_profile, render_key
 from vision02.protocol import physical_key_to_display_id
 
 DEFAULT_PROFILES = (
@@ -83,8 +84,8 @@ def inspect_profile(project: Path, name: str, paths=None) -> dict:
     for key_id in range(1, 16):
         cfg = profile.keys.get(key_id)
         keys[str(key_id)] = (
-            {"label": cfg.label, "image": str(cfg.image) if cfg.image else "", "action": _action_dict(cfg.action)}
-            if cfg else {"label": "", "image": "", "action": {"type": "none"}}
+            {"label": cfg.label, "image": str(cfg.image) if cfg.image else "", "action": _action_dict(cfg.action), "appearance": vars(cfg.appearance) if cfg.appearance is not None else None}
+            if cfg else {"label": "", "image": "", "action": {"type": "none"}, "appearance": None}
         )
     return {"name": name, "path": str(path), "sha256": _sha(raw), "keys": keys}
 
@@ -134,6 +135,12 @@ def _new_yaml(original: bytes, key_id: int, edited: dict, profile_names: set[str
         cfg = {"label": label.strip(), "action": action}
         if image.strip():
             cfg["image"] = image.strip()
+        if "appearance" in edited:
+            appearance = parse_appearance(edited["appearance"])
+            if appearance is not None:
+                cfg["appearance"] = vars(appearance)
+        elif "appearance" in data["keys"].get(key_id, {}):
+            cfg["appearance"] = data["keys"][key_id]["appearance"]
         data["keys"][key_id] = cfg
     return yaml.safe_dump(data, allow_unicode=True, sort_keys=False, width=90).encode("utf-8")
 
@@ -230,10 +237,51 @@ def save_key(project: Path, name: str, key_id: int, edited: dict,
             temp.unlink(missing_ok=True)
 
 
+
+
+def preview_appearance(project: Path, name: str, edited: dict, paths=None) -> dict:
+    """Prévia de aparência independente de ações/YAML, sem acesso a HID."""
+    path = _resolve_profile(project, name, paths)
+    label = edited.get("label", "")
+    if not isinstance(label, str):
+        raise ValueError("Rótulo deve ser texto")
+    image = edited.get("image", "")
+    if not isinstance(image, str):
+        raise ValueError("Imagem deve ser texto")
+    source = None
+    if image.strip():
+        source = Path(image.strip()).expanduser()
+        if not source.is_absolute():
+            source = path.parent / source
+        source = source.resolve()
+        if not source.is_file():
+            raise ValueError(f"Imagem não encontrada: {source}")
+    style = parse_appearance(edited.get("appearance"))
+    if not label.strip() and style is None:
+        from vision02.rendering import render_empty
+        result = render_empty()
+    else:
+        config = KeyConfig(key_id=1, label=label or " ", action=Action(type="command", argv=("true",)),
+                           image=source, appearance=style)
+        rendered = render_key(config)
+        if isinstance(rendered, Path):
+            with Image.open(rendered) as picture:
+                result = ImageOps.fit(ImageOps.exif_transpose(picture).convert("RGB"), (100, 100),
+                                      method=Image.Resampling.LANCZOS)
+        else:
+            result = rendered
+    digest = _sha(json.dumps(edited, ensure_ascii=False, sort_keys=True).encode())[:20]
+    if source is not None:
+        digest += f"-{source.stat().st_mtime_ns:x}"
+    target = _preview_root() / f"appearance-{digest}.png"
+    result.convert("RGB").save(target, format="PNG")
+    return {"ok": True, "image": str(target)}
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description="Backend YAML da GUI Vision 02; não acessa HID")
     parser.add_argument("--project", type=Path, default=ROOT)
-    parser.add_argument("--command", required=True, choices=("list", "inspect", "preview", "save", "icons-list", "icons-import"))
+    parser.add_argument("--command", required=True, choices=("list", "inspect", "preview", "save", "style-preview", "icons-list", "icons-import"))
     parser.add_argument("--profile")
     args = parser.parse_args(argv)
     try:
@@ -252,6 +300,8 @@ def main(argv=None) -> int:
                 raise ValueError("Informe --profile")
             if args.command == "inspect":
                 result = {"ok": True, "profile": inspect_profile(args.project, args.profile)}
+            elif args.command == "style-preview":
+                result = preview_appearance(args.project, args.profile, json.load(sys.stdin))
             else:
                 request = json.load(sys.stdin)
                 key_id = request["key_id"]

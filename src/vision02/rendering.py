@@ -4,9 +4,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw, ImageFont, ImageOps
 
-from .profiles.models import KeyConfig, Profile
+from .profiles.models import KeyAppearance, KeyConfig, Profile
 
 
 LCD_SIZE = (100, 100)
@@ -162,11 +162,104 @@ def render_empty() -> Image.Image:
     return Image.new("RGB", LCD_SIZE, BACKGROUND)
 
 
+
+
+_FONTS = {
+    "sans": ("DejaVuSans.ttf", "DejaVuSans-Bold.ttf"),
+    "serif": ("DejaVuSerif.ttf", "DejaVuSerif-Bold.ttf"),
+    "mono": ("DejaVuSansMono.ttf", "DejaVuSansMono-Bold.ttf"),
+}
+
+
+def _appearance_font(style: KeyAppearance, size: int):
+    names = _FONTS[style.font_family]
+    filename = names[1 if style.font_weight == "bold" else 0]
+    try:
+        return ImageFont.truetype(filename, size)
+    except OSError:
+        try:
+            return ImageFont.truetype("DejaVuSans.ttf", size)
+        except OSError:
+            return ImageFont.load_default()
+
+
+def _appearance_background(image_path: Path | None, style: KeyAppearance) -> Image.Image:
+    color = style.background
+    background = Image.new("RGB", LCD_SIZE, color)
+    if image_path is None:
+        return background
+    with Image.open(image_path) as source:
+        source = ImageOps.exif_transpose(source).convert("RGBA")
+        if style.image_fit == "cover":
+            overlay = ImageOps.fit(source, LCD_SIZE, method=Image.Resampling.LANCZOS)
+        elif style.image_fit == "contain":
+            overlay = source.copy()
+            overlay.thumbnail(LCD_SIZE, Image.Resampling.LANCZOS)
+            centered = Image.new("RGBA", LCD_SIZE, (0, 0, 0, 0))
+            centered.alpha_composite(overlay, ((100 - overlay.width)//2, (100 - overlay.height)//2))
+            overlay = centered
+        else:
+            overlay = source.resize(LCD_SIZE, Image.Resampling.LANCZOS)
+    composed = background.convert("RGBA")
+    composed.alpha_composite(overlay)
+    return composed.convert("RGB")
+
+
+def render_appearance(label: str, image: Path | None, style: KeyAppearance) -> Image.Image:
+    """Renderiza fundo + texto usando exatamente o pipeline usado no LCD."""
+    output = _appearance_background(image, style)
+    text = label if style.text is None else style.text
+    if not style.show_text or not text.strip():
+        return output
+    draw = ImageDraw.Draw(output)
+    maximum = 92
+    for size in range(style.font_size, 7, -1):
+        font = _appearance_font(style, size)
+        lines = _wrap(draw, text, font, maximum)
+        lineheight = _line_height(draw, font)
+        if len(lines) * lineheight <= maximum:
+            break
+    else:
+        font = _appearance_font(style, 8)
+        lines = _wrap(draw, text, font, maximum)
+        lineheight = _line_height(draw, font)
+    cap = max(1, maximum // lineheight)
+    if len(lines) > cap:
+        lines = lines[:cap]
+        while lines[-1] and _width(draw, lines[-1] + "…", font) > maximum:
+            lines[-1] = lines[-1][:-1]
+        lines[-1] += "…"
+    height = len(lines) * lineheight
+    if style.vertical == "top":
+        y = 4
+    elif style.vertical == "bottom":
+        y = 96 - height
+    else:
+        y = (100 - height) / 2
+    y += style.offset_y
+    for line in lines:
+        bbox = draw.textbbox((0, 0), line, font=font)
+        width = bbox[2] - bbox[0]
+        if style.horizontal == "left":
+            x = 4
+        elif style.horizontal == "right":
+            x = 96 - width
+        else:
+            x = (100 - width) / 2
+        x += style.offset_x
+        draw.text((x - bbox[0], y - bbox[1]), line, font=font, fill=style.text_color)
+        y += lineheight
+    return output
+
+
 def render_key(config: KeyConfig | None) -> Image.Image | Path:
     """Seleciona imagem personalizada ou gera o rótulo."""
 
     if config is None:
         return render_empty()
+
+    if config.appearance is not None:
+        return render_appearance(config.label, config.image, config.appearance)
 
     if config.image is not None:
         return config.image

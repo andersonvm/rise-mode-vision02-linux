@@ -20,7 +20,7 @@ METADATA = ROOT / "apps/vision02_gui_data.py"
 import gi
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
-from gi.repository import Adw, Gio, GLib, Gtk, Pango
+from gi.repository import Adw, Gdk, Gio, GLib, Gtk, Pango
 
 KINDS = ("none", "command", "url", "script", "hotkey", "profile")
 KIND_LABELS = ("Sem ação", "Comando", "URL", "Script", "Atalho", "Trocar perfil")
@@ -183,6 +183,8 @@ class EditorWindow(Adw.ApplicationWindow):
         self._syncing = True
         self.image_paths = {}
         self.key_buttons = {}
+        self._live_generation = 0
+        self._live_timer = None
 
         toolbar = Adw.ToolbarView()
         header = Adw.HeaderBar()
@@ -259,6 +261,48 @@ class EditorWindow(Adw.ApplicationWindow):
         library_btn.connect("clicked", self._open_icon_library)
         image_row.append(library_btn)
         right.append(image_row)
+
+        self.style_frame = Gtk.Expander(label="Aparência avançada (texto, cores e posição)")
+        self.style_frame.set_expanded(False)
+        style_content = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        style_content.set_margin_top(8)
+        style_content.set_margin_bottom(8)
+        self.style_enabled = Gtk.CheckButton(label="Usar aparência personalizada nesta tecla")
+        self.style_enabled.connect("toggled", self._style_toggled)
+        style_content.append(self.style_enabled)
+        self.style_fields = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        style_content.append(self.style_fields)
+        self.style_text = self._entry(self.style_fields, "Texto visual (vazio usa o rótulo)")
+        self.style_show_text = Gtk.CheckButton(label="Exibir texto sobre o fundo/imagem")
+        self.style_show_text.connect("toggled", self._on_changed)
+        self.style_fields.append(self.style_show_text)
+        self.style_background = self._color_field("Cor do fundo (#RRGGBB)", "#080C16")
+        self.style_text_color = self._color_field("Cor do texto (#RRGGBB)", "#F5F7FA")
+        self.style_family = self._style_choice("Família da fonte", ("Sans", "Serif", "Mono"))
+        self.style_weight = self._style_choice("Estilo da fonte", ("Negrito", "Normal"))
+        self.style_size = self._style_spin("Tamanho da fonte", 8, 36, 18)
+        self.style_horizontal = self._style_choice("Alinhamento horizontal", ("Centro", "Esquerda", "Direita"))
+        self.style_vertical = self._style_choice("Alinhamento vertical", ("Centro", "Topo", "Base"))
+        self.style_offset_x = self._style_spin("Deslocamento X (pixels)", -40, 40, 0)
+        self.style_offset_y = self._style_spin("Deslocamento Y (pixels)", -40, 40, 0)
+        self.style_fit = self._style_choice("Ajuste da imagem", ("Preencher", "Conter", "Esticar"))
+        self.style_frame.set_child(style_content)
+        right.append(self.style_frame)
+
+        live_header = Gtk.Label(label="Prévia visual da tecla (100 × 100)")
+        live_header.set_xalign(0)
+        live_header.add_css_class("caption")
+        right.append(live_header)
+        self.live_picture = Gtk.Picture()
+        self.live_picture.set_size_request(180, 180)
+        self.live_picture.set_content_fit(Gtk.ContentFit.CONTAIN)
+        self.live_picture.set_halign(Gtk.Align.START)
+        right.append(self.live_picture)
+        self.live_hint = Gtk.Label(label="A prévia não altera o YAML nem o dispositivo.")
+        self.live_hint.set_xalign(0)
+        self.live_hint.set_wrap(True)
+        self.live_hint.add_css_class("dim-label")
+        right.append(self.live_hint)
 
         right.append(Gtk.Label(label="Tipo de ação"))
         self.kind_combo = Gtk.DropDown.new_from_strings(KIND_LABELS)
@@ -354,10 +398,142 @@ class EditorWindow(Adw.ApplicationWindow):
         parent.append(group)
         return text
 
+    def _style_choice(self, title, labels):
+        row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        caption = Gtk.Label(label=title)
+        caption.set_hexpand(True)
+        caption.set_xalign(0)
+        row.append(caption)
+        selection = Gtk.DropDown.new_from_strings(labels)
+        selection.connect("notify::selected", self._on_changed)
+        row.append(selection)
+        self.style_fields.append(row)
+        return selection
+
+    def _style_spin(self, title, minimum, maximum, default):
+        row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        caption = Gtk.Label(label=title)
+        caption.set_xalign(0)
+        caption.set_hexpand(True)
+        row.append(caption)
+        spinner = Gtk.SpinButton.new_with_range(minimum, maximum, 1)
+        spinner.set_value(default)
+        spinner.connect("value-changed", self._on_changed)
+        row.append(spinner)
+        self.style_fields.append(row)
+        return spinner
+
+    def _color_field(self, title, initial):
+        row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        color = self._entry(row, title)
+        color.set_text(initial)
+        color.set_max_length(7)
+        picker = Gtk.ColorButton()
+        picker.set_tooltip_text("Selecionar cor")
+        picker.connect("color-set", self._color_selected, color)
+        row.append(picker)
+        rgba = Gdk.RGBA()
+        if rgba.parse(initial):
+            picker.set_rgba(rgba)
+        color.connect("changed", self._update_color_button, picker)
+        self.style_fields.append(row)
+        return color
+
+    def _color_selected(self, button, entry):
+        color = button.get_rgba()
+        entry.set_text("#{:02X}{:02X}{:02X}".format(
+            round(color.red * 255), round(color.green * 255), round(color.blue * 255)))
+
+    def _update_color_button(self, entry, picker):
+        rgba = Gdk.RGBA()
+        if rgba.parse(entry.get_text()) and re.fullmatch(r"#[0-9A-Fa-f]{6}", entry.get_text()):
+            picker.set_rgba(rgba)
+
+    def _style_toggled(self, *_):
+        self.style_fields.set_sensitive(self.style_enabled.get_active())
+        self._on_changed()
+
+    def _style_payload(self):
+        if not self.style_enabled.get_active():
+            return None
+        text = self.style_text.get_text()
+        return {
+            "background": self.style_background.get_text().strip(),
+            "text_color": self.style_text_color.get_text().strip(),
+            "text": text if text else None,
+            "show_text": self.style_show_text.get_active(),
+            "font_family": ("sans", "serif", "mono")[self.style_family.get_selected()],
+            "font_weight": ("bold", "regular")[self.style_weight.get_selected()],
+            "font_size": self.style_size.get_value_as_int(),
+            "horizontal": ("center", "left", "right")[self.style_horizontal.get_selected()],
+            "vertical": ("center", "top", "bottom")[self.style_vertical.get_selected()],
+            "offset_x": self.style_offset_x.get_value_as_int(),
+            "offset_y": self.style_offset_y.get_value_as_int(),
+            "image_fit": ("cover", "contain", "stretch")[self.style_fit.get_selected()],
+        }
+
+    def _populate_style(self, config):
+        data = config or {}
+        self.style_enabled.set_active(config is not None)
+        self.style_background.set_text(data.get("background", "#080C16"))
+        self.style_text_color.set_text(data.get("text_color", "#F5F7FA"))
+        self.style_text.set_text(data.get("text") or "")
+        self.style_show_text.set_active(data.get("show_text", True))
+        self.style_family.set_selected(("sans", "serif", "mono").index(data.get("font_family", "sans")))
+        self.style_weight.set_selected(("bold", "regular").index(data.get("font_weight", "bold")))
+        self.style_size.set_value(data.get("font_size", 18))
+        self.style_horizontal.set_selected(("center", "left", "right").index(data.get("horizontal", "center")))
+        self.style_vertical.set_selected(("center", "top", "bottom").index(data.get("vertical", "center")))
+        self.style_offset_x.set_value(data.get("offset_x", 0))
+        self.style_offset_y.set_value(data.get("offset_y", 0))
+        self.style_fit.set_selected(("cover", "contain", "stretch").index(data.get("image_fit", "cover")))
+        self.style_fields.set_sensitive(config is not None)
+        if config is not None:
+            self.style_frame.set_expanded(True)
+
+    def _schedule_live_preview(self):
+        if not self.profile or self.busy:
+            return
+        self._live_generation += 1
+        generation = self._live_generation
+        if self._live_timer is not None:
+            GLib.source_remove(self._live_timer)
+        self._live_timer = GLib.timeout_add(450, self._start_live_preview, generation)
+
+    def _start_live_preview(self, generation):
+        self._live_timer = None
+        if generation != self._live_generation or not self.profile:
+            return False
+        edited = {"label": self.entries["label"].get_text(),
+                  "image": self.entries["image"].get_text(),
+                  "appearance": self._style_payload()}
+        profile = self.profile_name
+        key = self.selected_key
+        def worker():
+            try:
+                path = backend("style-preview", profile, edited, timeout=20)["image"]
+                error = None
+            except (RuntimeError, OSError, ValueError, subprocess.SubprocessError) as exc:
+                path, error = None, str(exc)
+            GLib.idle_add(self._live_complete, generation, key, path, error)
+        threading.Thread(target=worker, daemon=True, name="vision02-style-preview").start()
+        return False
+
+    def _live_complete(self, generation, key, path, error):
+        if generation != self._live_generation or key != self.selected_key:
+            return False
+        if error:
+            self.live_hint.set_text(f"Prévia indisponível: {error}")
+        else:
+            self.live_picture.set_file(Gio.File.new_for_path(path))
+            self.live_hint.set_text("Prévia atualizada. Salve e aplique para enviar ao LCD.")
+        return False
+
     def _on_changed(self, *_):
         if not self._syncing:
             self.dirty = True
             self.status.set_text("Alterações locais não salvas.")
+            self._schedule_live_preview()
 
     def _change_kind(self, *_):
         kind = KINDS[self.kind_combo.get_selected()]
@@ -423,6 +599,7 @@ class EditorWindow(Adw.ApplicationWindow):
         self.selected_key = key_id
         self._populate_form()
         self._highlight_selected()
+        self._schedule_live_preview()
 
     def _on_profile_changed(self, combo, _):
         if self._syncing or self.busy:
@@ -455,6 +632,7 @@ class EditorWindow(Adw.ApplicationWindow):
             self.image_paths = {x["id"]: x["image"] for x in info["keys"]}
             self._draw_board()
             self._populate_form()
+            self._schedule_live_preview()
             self.status.set_text(f"Editando: {self.profile['path']}")
         except (RuntimeError, OSError, subprocess.SubprocessError, ValueError, KeyError) as exc:
             self.status.set_text(f"Falha ao carregar perfil: {exc}")
@@ -500,6 +678,7 @@ class EditorWindow(Adw.ApplicationWindow):
             self.interpreter.set_selected(0 if action.get("interpreter", "bash") == "bash" else 1)
             self.kind_combo.set_selected(KINDS.index(kind))
             self._change_kind()
+            self._populate_style(cfg.get("appearance"))
             self.dirty = False
         finally:
             self._syncing = False
@@ -520,7 +699,8 @@ class EditorWindow(Adw.ApplicationWindow):
         elif kind == "profile":
             action["target"] = self.entries["target"].get_text().strip()
         return {"label": self.entries["label"].get_text(),
-                "image": self.entries["image"].get_text(), "action": action}
+                "image": self.entries["image"].get_text(), "action": action,
+                "appearance": self._style_payload()}
 
     def _work(self, operation):
         if self.busy or not self.profile:

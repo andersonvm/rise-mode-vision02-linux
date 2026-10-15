@@ -8,7 +8,7 @@ from urllib.parse import urlsplit
 
 import yaml
 
-from .models import Action, KeyConfig, Profile
+from .models import Action, KeyAppearance, KeyConfig, Profile
 
 
 class ProfileValidationError(ValueError):
@@ -188,6 +188,49 @@ def _action(data: dict, context: str, profile_directory: Path) -> Action:
     )
 
 
+
+
+_APPEARANCE_DEFAULTS = {
+    "background": "#080C16", "text": None, "font_family": "sans",
+    "font_size": 18, "font_weight": "bold", "text_color": "#F5F7FA",
+    "horizontal": "center", "vertical": "center", "offset_x": 0, "offset_y": 0,
+    "image_fit": "cover", "show_text": True,
+}
+_APPEARANCE_ENUMS = {
+    "font_family": {"sans", "serif", "mono"},
+    "font_weight": {"regular", "bold"},
+    "horizontal": {"left", "center", "right"},
+    "vertical": {"top", "center", "bottom"},
+    "image_fit": {"cover", "contain", "stretch"},
+}
+
+
+def parse_appearance(value: dict | None) -> KeyAppearance | None:
+    """Valida os campos opcionais sem converter números/booleans implicitamente."""
+    if value is None:
+        return None
+    data = _mapping(value, "appearance")
+    _fields(data, set(_APPEARANCE_DEFAULTS), "appearance")
+    result = dict(_APPEARANCE_DEFAULTS)
+    result.update(data)
+    for color in ("background", "text_color"):
+        if not isinstance(result[color], str) or not re.fullmatch(r"#[0-9a-fA-F]{6}", result[color]):
+            raise ProfileValidationError(f"appearance.{color} deve ser #RRGGBB")
+    if result["text"] is not None and (not isinstance(result["text"], str) or len(result["text"]) > 120):
+        raise ProfileValidationError("appearance.text deve ter até 120 caracteres")
+    for field, allowed in _APPEARANCE_ENUMS.items():
+        if not isinstance(result[field], str) or result[field] not in allowed:
+            raise ProfileValidationError(f"appearance.{field}: escolha entre {', '.join(sorted(allowed))}")
+    if type(result["font_size"]) is not int or not 8 <= result["font_size"] <= 36:
+        raise ProfileValidationError("appearance.font_size deve estar entre 8 e 36")
+    for field in ("offset_x", "offset_y"):
+        if type(result[field]) is not int or not -40 <= result[field] <= 40:
+            raise ProfileValidationError(f"appearance.{field} deve estar entre -40 e 40")
+    if type(result["show_text"]) is not bool:
+        raise ProfileValidationError("appearance.show_text deve ser booleano")
+    return KeyAppearance(**result)
+
+
 def load_profile(path: str | Path) -> Profile:
     """Carrega e valida um perfil sem executar ações."""
 
@@ -233,7 +276,7 @@ def load_profile(path: str | Path) -> Profile:
 
         _fields(
             config,
-            {"label", "image", "action"},
+            {"label", "image", "action", "appearance"},
             context,
         )
 
@@ -269,6 +312,7 @@ def load_profile(path: str | Path) -> Profile:
             label=label,
             action=action,
             image=image,
+            appearance=parse_appearance(config.get("appearance")),
         )
 
     return Profile(

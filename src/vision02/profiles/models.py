@@ -18,11 +18,29 @@ class Action:
 
 
 @dataclass(frozen=True)
+class KeyAppearance:
+    """Aparência opcional; ausente mantém a renderização legada."""
+    background: str = "#080C16"
+    text: str | None = None
+    font_family: str = "sans"
+    font_size: int = 18
+    font_weight: str = "bold"
+    text_color: str = "#F5F7FA"
+    horizontal: str = "center"
+    vertical: str = "center"
+    offset_x: int = 0
+    offset_y: int = 0
+    image_fit: str = "cover"
+    show_text: bool = True
+
+
+@dataclass(frozen=True)
 class KeyConfig:
     key_id: int
     label: str
     action: Action
     image: Path | None = None
+    appearance: KeyAppearance | None = None
 
 
 @dataclass(frozen=True)
