@@ -17,6 +17,7 @@ import time
 from PIL import Image, ImageDraw, ImageFont
 
 from .protocol import physical_key_to_display_id
+from .system_status import StatusWorker, status_mapping, status_image
 
 
 METRIC_LABELS = {
@@ -314,14 +315,21 @@ class MetricsWorker:
 class Dashboard:
     """Só a thread HID chama tick(). Uma escrita por tick no máximo."""
 
-    def __init__(self, worker: MetricsWorker, *, minimum_gap: float = 0.20):
+    def __init__(
+        self, worker: MetricsWorker, *, minimum_gap: float = 0.20,
+        status_worker: StatusWorker | None = None,
+    ):
         if minimum_gap < 0.0:
             raise ValueError('minimum_gap negativo')
         self.worker = worker
+        self.status_worker = status_worker
         self.minimum_gap = minimum_gap
         self._active: str | None = None
         self._revision = -1
         self._waiting: deque[tuple[int, Image.Image]] = deque()
+        self._status_waiting: deque[tuple[int, Image.Image]] = deque()
+        self._status_revision = -1
+        self._next_status = False
         self._last_write = -float('inf')
 
     @staticmethod
@@ -341,26 +349,57 @@ class Dashboard:
         self._active = None
         self._revision = -1
         self._waiting.clear()
+        self._status_revision = -1
+        self._status_waiting.clear()
+        self._next_status = False
 
     def tick(self, profile, device, *, now: float | None = None) -> bool:
-        """Atualiza UM LCD por iteração do loop HID; False se não houve escrita."""
+        """No máximo UMA transmissão potencial por passagem e intervalo global.
+
+        Enfileira métricas e estados separadamente; alterna filas para que
+        atualizações de CPU/RAM não adiem áudio, microfone e rede.
+        """
         now = time.monotonic() if now is None else now
-        mapping = self.mapping(profile)
-        if not mapping:
+        metrics = self.mapping(profile)
+        status = status_mapping(profile) if self.status_worker is not None else {}
+        if not metrics and not status:
             self.invalidate()
             return False
         if profile.name != self._active:
+            self.invalidate()
             self._active = profile.name
-            self._revision = -1
-            self._waiting.clear()
-        revision, values = self.worker.latest()
-        if revision != self._revision and values is not None:
-            self._revision = revision
-            self._waiting = deque((key, metric_image(name, values)) for key, name in mapping.items())
-        if not self._waiting or now - self._last_write < self.minimum_gap:
+
+        if metrics:
+            revision, values = self.worker.latest()
+            if revision != self._revision and values is not None:
+                self._revision = revision
+                self._waiting = deque(
+                    (key, metric_image(name, values)) for key, name in metrics.items()
+                )
+
+        if status and self.status_worker is not None:
+            revision, snapshot = self.status_worker.latest()
+            if revision != self._status_revision and snapshot is not None:
+                self._status_revision = revision
+                self._status_waiting = deque(
+                    (key, status_image(category, snapshot))
+                    for key, category in status.items()
+                )
+
+        if now - self._last_write < self.minimum_gap:
             return False
-        key, image = self._waiting.popleft()
-        # SOMENTE o dono HID executa set_image, nunca a thread coletora.
+        if self._status_waiting and (self._next_status or not self._waiting):
+            key, image = self._status_waiting.popleft()
+            self._next_status = False
+        elif self._waiting:
+            key, image = self._waiting.popleft()
+            self._next_status = True
+        elif self._status_waiting:
+            key, image = self._status_waiting.popleft()
+            self._next_status = False
+        else:
+            return False
+        # Único ponto de saída HID para ambas as categorias.
         device.set_image(physical_key_to_display_id(key), image, skip_unchanged=True)
         self._last_write = now
         return True

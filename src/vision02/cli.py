@@ -21,6 +21,7 @@ from .profiles import (
 from .switching import ProfileSwitcher
 from .rendering import render_profile
 from .system_dashboard import Dashboard, MetricsWorker
+from .system_status import StatusWorker
 from .user_profiles import default_profile_paths
 from .profile_catalog import choose_initial, write_last_active
 from .protocol import physical_key_to_display_id
@@ -106,7 +107,8 @@ def _run_profile(
     profile = manager.active
     controller = Vision02Controller(profile)
     metrics_worker = MetricsWorker()
-    dashboard = Dashboard(metrics_worker)
+    status_worker = StatusWorker()
+    dashboard = Dashboard(metrics_worker, status_worker=status_worker)
 
     # Teclas cujos eventos devem ser ignorados até a liberação.
     blocked_keys: set[int] = set()
@@ -190,6 +192,7 @@ def _run_profile(
         try:
             controller.start()
             metrics_worker.start()
+            status_worker.start()
 
             for key_id, image in render_profile(profile).items():
                 device.set_image(
@@ -262,6 +265,7 @@ def _run_profile(
             print("\\nEncerrando perfil...", flush=True)
 
         finally:
+            status_worker.close()
             metrics_worker.close()
             if control_server is not None:
                 control_server.close()
