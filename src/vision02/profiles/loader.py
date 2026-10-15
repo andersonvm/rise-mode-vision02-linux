@@ -175,7 +175,7 @@ def _action(data: dict, context: str, profile_directory: Path) -> Action:
 
     if action_type == "obs":
         from vision02.obs_control import OBS_OPERATIONS
-        _fields(data, {"type", "operation", "slot", "input"}, context)
+        _fields(data, {"type", "operation", "slot", "input", "scene"}, context)
         operation = data.get("operation")
         if not isinstance(operation, str) or operation not in OBS_OPERATIONS:
             raise ProfileValidationError(f"{context}.operation: comando OBS inválido")
@@ -192,7 +192,15 @@ def _action(data: dict, context: str, profile_directory: Path) -> Action:
             source = _text(source, f"{context}.input")
             if len(source) > 128:
                 raise ProfileValidationError(f"{context}.input muito longo")
-        return Action(type="obs", obs_operation=operation, obs_slot=slot, obs_source=source)
+        scene = data.get("scene")
+        if operation == "scene_name":
+            scene = _text(scene, f"{context}.scene").strip()
+            if len(scene) > 128 or any(ord(char) < 32 for char in scene):
+                raise ProfileValidationError(f"{context}.scene inválido (até 128 caracteres)")
+        elif scene is not None:
+            raise ProfileValidationError(f"{context}.scene só é permitido em scene_name")
+        return Action(type="obs", obs_operation=operation, obs_slot=slot,
+                      obs_source=source, obs_scene=scene)
 
     if action_type == "profile":
         _fields(data, {"type", "target"}, context)

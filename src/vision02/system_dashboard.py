@@ -18,7 +18,7 @@ from PIL import Image, ImageDraw, ImageFont
 
 from .protocol import physical_key_to_display_id
 from .system_status import StatusWorker, status_mapping, status_image
-from .obs_control import OBSWorker, obs_mapping, obs_image
+from .obs_control import OBSWorker, obs_mapping, scene_render_queue
 
 
 METRIC_LABELS = {
@@ -398,10 +398,7 @@ class Dashboard:
             revision, snapshot = self.obs_worker.latest()
             if revision != self._obs_revision:
                 self._obs_revision = revision
-                self._obs_waiting = deque(
-                    (key, obs_image(action, snapshot))
-                    for key, action in obs.items()
-                )
+                self._obs_waiting = deque(scene_render_queue(obs, snapshot))
 
         if now - self._last_write < self.minimum_gap:
             return False

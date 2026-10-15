@@ -215,6 +215,9 @@ class EditorWindow(Adw.ApplicationWindow):
         self.profile_combo = Gtk.DropDown.new_from_strings(self.profile_names)
         self.profile_combo.connect("notify::selected", self._on_profile_changed)
         top.append(self.profile_combo)
+        obs_btn = Gtk.Button(label="Configurar OBS")
+        obs_btn.connect("clicked", self._open_obs_panel)
+        top.append(obs_btn)
         profiles_btn = Gtk.Button(label="Gerenciar perfis")
         profiles_btn.connect("clicked", self._open_profiles)
         top.append(profiles_btn)
@@ -319,6 +322,7 @@ class EditorWindow(Adw.ApplicationWindow):
             ("operation", "OBS: operação (ex.: toggle_record, scene_slot)"),
             ("slot", "OBS: número da cena, de 1 a 3"),
             ("input", "OBS: nome da entrada de áudio (opcional)"),
+            ("scene", "OBS: nome exato da cena (para scene_name)"),
         ]
         self.action_rows = {}
         for key, label in spec:
@@ -361,6 +365,16 @@ class EditorWindow(Adw.ApplicationWindow):
 
         self._load_profile()
         self._syncing = False
+
+    def _open_obs_panel(self, *_):
+        if self.dirty:
+            self.status.set_text("Salve ou descarte suas alterações antes de abrir o painel OBS.")
+            return
+        try:
+            subprocess.Popen([str(ROOT / "scripts/vision02-obs-panel")],
+                             cwd=str(ROOT), start_new_session=True)
+        except OSError as exc:
+            self.status.set_text(f"Falha ao abrir painel OBS: {exc}")
 
     def _open_profiles(self, *_):
         try:
@@ -546,7 +560,7 @@ class EditorWindow(Adw.ApplicationWindow):
             "script": {"path", "args"},
             "hotkey": {"keys"},
             "profile": {"target"},
-            "obs": {"operation", "slot", "input"},
+            "obs": {"operation", "slot", "input", "scene"},
         }.get(kind, set())
         for field, row in self.action_rows.items():
             row.set_visible(field in showing)
@@ -682,6 +696,7 @@ class EditorWindow(Adw.ApplicationWindow):
             self.entries["operation"].set_text(action.get("operation", "") or "")
             self.entries["slot"].set_text(str(action.get("slot") or ""))
             self.entries["input"].set_text(action.get("input", "") or "")
+            self.entries["scene"].set_text(action.get("scene", "") or "")
             self.interpreter.set_selected(0 if action.get("interpreter", "bash") == "bash" else 1)
             self.kind_combo.set_selected(KINDS.index(kind))
             self._change_kind()
@@ -713,6 +728,9 @@ class EditorWindow(Adw.ApplicationWindow):
             raw_input = self.entries["input"].get_text().strip()
             if raw_input:
                 action["input"] = raw_input
+            raw_scene = self.entries["scene"].get_text().strip()
+            if raw_scene:
+                action["scene"] = raw_scene
         return {"label": self.entries["label"].get_text(),
                 "image": self.entries["image"].get_text(), "action": action,
                 "appearance": self._style_payload()}

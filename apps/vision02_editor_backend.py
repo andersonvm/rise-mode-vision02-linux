@@ -79,6 +79,8 @@ def _action_dict(action) -> dict:
             result["slot"] = action.obs_slot
         if action.obs_source is not None:
             result["input"] = action.obs_source
+        if action.obs_scene is not None:
+            result["scene"] = action.obs_scene
     return result
 
 
@@ -117,6 +119,8 @@ def _action_payload(action: dict, other_profiles: set[str]) -> dict | None:
             result["slot"] = action["slot"]
         if action.get("input"):
             result["input"] = action["input"]
+        if action.get("scene"):
+            result["scene"] = action["scene"]
     elif kind == "profile":
         target = action.get("target")
         if target not in other_profiles:

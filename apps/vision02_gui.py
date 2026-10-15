@@ -49,6 +49,9 @@ class Vision02Window(Adw.ApplicationWindow):
         self._profiles_button = Gtk.Button(label="Gerenciar perfis")
         self._profiles_button.connect("clicked", self._open_profiles)
         header.pack_start(self._profiles_button)
+        self._obs_button = Gtk.Button(label="Configurar OBS")
+        self._obs_button.connect("clicked", self._open_obs_panel)
+        header.pack_start(self._obs_button)
         toolbar.add_top_bar(header)
         self.set_content(toolbar)
 
@@ -127,6 +130,13 @@ class Vision02Window(Adw.ApplicationWindow):
         except (OSError, subprocess.SubprocessError, ValueError, KeyError) as exc:
             self._preview_data = {}
             self.warning.set_text(f"Não foi possível gerar prévias locais: {exc}")
+
+    def _open_obs_panel(self, *_):
+        try:
+            subprocess.Popen([str(ROOT / "scripts" / "vision02-obs-panel")],
+                             cwd=str(ROOT), start_new_session=True)
+        except OSError as exc:
+            self.status_label.set_text(f"Não foi possível abrir painel OBS: {exc}")
 
     def _open_editor(self, *_):
         """Abre processo GTK independente; não cria outra conexão HID."""

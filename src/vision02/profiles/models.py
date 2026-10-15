@@ -18,6 +18,7 @@ class Action:
     obs_operation: str | None = None
     obs_slot: int | None = None
     obs_source: str | None = None
+    obs_scene: str | None = None
 
 
 @dataclass(frozen=True)

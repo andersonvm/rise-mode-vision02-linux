@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 
 OBS_OPERATIONS = frozenset((
     'toggle_record', 'toggle_pause', 'toggle_stream', 'toggle_mic', 'toggle_desktop',
-    'scene_slot', 'next_scene', 'previous_scene', 'toggle_virtualcam',
+    'scene_slot', 'scene_name', 'next_scene', 'previous_scene', 'toggle_virtualcam',
     'save_replay', 'screenshot', 'refresh',
 ))
 
@@ -99,12 +99,16 @@ def perform_action(connection, action: Action, snapshot: OBSSnapshot, config: di
             raise OBSError(f'Entrada {key} não encontrada; configure {custom} em obs.json')
         connection.call('ToggleInputMute', {'inputName': name})
         return
-    if operation in ('scene_slot', 'next_scene', 'previous_scene'):
+    if operation in ('scene_slot', 'scene_name', 'next_scene', 'previous_scene'):
         response = connection.call('GetSceneList')
         names = [item['sceneName'] for item in response.get('scenes', ())]
         if not names:
             raise OBSError('OBS não possui cenas')
-        if operation == 'scene_slot':
+        if operation == 'scene_name':
+            if action.obs_scene not in names:
+                raise OBSError(f'Cena não existe no OBS: {action.obs_scene!r}')
+            target = action.obs_scene
+        elif operation == 'scene_slot':
             if action.obs_slot is None or len(names) < action.obs_slot:
                 raise OBSError('Slot de cena não existe no OBS')
             target = names[action.obs_slot - 1]
@@ -249,7 +253,59 @@ def _font(size=14):
         return ImageFont.load_default()
 
 
-def obs_image(action: Action, snapshot: OBSSnapshot) -> Image.Image:
+def resolved_scene(action: Action, snapshot: OBSSnapshot) -> str | None:
+    """Resolve um slot legado contra o snapshot OBS; nomes não dependem da ordem."""
+    if action.obs_operation == 'scene_name':
+        return action.obs_scene if action.obs_scene in snapshot.scenes else None
+    if action.obs_operation == 'scene_slot':
+        slot = action.obs_slot
+        return snapshot.scenes[slot - 1] if isinstance(slot, int) and 1 <= slot <= len(snapshot.scenes) else None
+    return None
+
+
+def scene_claims(mapping: dict[int, Action], snapshot: OBSSnapshot) -> set[int]:
+    """Uma única tecla representa cada cena: prioriza associação por nome.
+
+    Um perfil legado pode conter slot e nome resolvendo para a mesma cena.
+    A duplicidade não deverá acender duas teclas como ATIVA.
+    """
+    grouped: dict[str, list[tuple[int, Action]]] = {}
+    for key, action in mapping.items():
+        scene = resolved_scene(action, snapshot)
+        if scene is not None:
+            grouped.setdefault(scene, []).append((key, action))
+    claims = set()
+    for members in grouped.values():
+        key, _ = min(members, key=lambda item: (item[1].obs_operation != 'scene_name', item[0]))
+        claims.add(key)
+    return claims
+
+
+def scene_render_queue(mapping: dict[int, Action], snapshot: OBSSnapshot) -> list[tuple[int, Image.Image]]:
+    """Envia a desativação das cenas anteriores ANTES de ativar a cena atual."""
+    claims = scene_claims(mapping, snapshot)
+    updates = []
+    for key, action in mapping.items():
+        scene = resolved_scene(action, snapshot)
+        duplicate = scene is not None and key not in claims
+        active = (snapshot.connected and key in claims and scene == snapshot.scene)
+        updates.append((active, key, obs_image(action, snapshot, duplicate=duplicate)))
+    updates.sort(key=lambda item: (item[0], item[1]))
+    return [(key, image) for _, key, image in updates]
+
+
+def _scene_title(scene: str | None) -> str:
+    if not scene:
+        return 'CENA ?'
+    # O nome configurado é mais estável e útil que CENA 1/2/3.
+    title = scene.strip()
+    while len(title) > 1 and ImageDraw.Draw(Image.new('RGB', (1, 1))).textbbox(
+        (0, 0), title, font=_font(12))[2] > 86:
+        title = title[:-2] + '…'
+    return title
+
+
+def obs_image(action: Action, snapshot: OBSSnapshot, *, duplicate: bool = False) -> Image.Image:
     op = action.obs_operation
     labels = {
         'toggle_record': ('REC', snapshot.recording, 'GRAVANDO', 'PARADO'),
@@ -261,10 +317,10 @@ def obs_image(action: Action, snapshot: OBSSnapshot) -> Image.Image:
         'save_replay': ('REPLAY', snapshot.replay, 'ATIVO', 'PARADO'),
         'refresh': ('OBS', snapshot.connected, 'CONECTADO', 'OFFLINE'),
     }
-    if op == 'scene_slot':
-        scene = snapshot.scenes[(action.obs_slot or 1) - 1] if len(snapshot.scenes) >= (action.obs_slot or 1) else None
-        title = f'CENA {action.obs_slot or "?"}'
-        active = snapshot.scene == scene if scene else None
+    if op in ('scene_slot', 'scene_name'):
+        scene = resolved_scene(action, snapshot)
+        title = _scene_title(scene or action.obs_scene or f'CENA {action.obs_slot or "?"}')
+        active = snapshot.scene == scene if scene is not None else None
         yes, no = 'ATIVA', 'INATIVA'
     elif op in labels:
         title, active, yes, no = labels[op]
@@ -276,14 +332,16 @@ def obs_image(action: Action, snapshot: OBSSnapshot) -> Image.Image:
                                   'screenshot': ('CAPTURA',None,'','')}[op])
     if not snapshot.connected:
         text, color = 'OFFLINE', (237, 155, 98)
+    elif duplicate:
+        text, color = 'DUPLICADA', (242, 174, 103)
     elif active is None:
-        text, color = 'N/D' if op in labels or op == 'scene_slot' else 'PRONTO', (160, 173, 195)
+        text, color = 'N/D' if op in labels or op in ('scene_slot', 'scene_name') else 'PRONTO', (160, 173, 195)
     else:
         text, color = (yes, (82, 220, 169)) if active else (no, (242, 174, 103))
     result = Image.new('RGB', (100, 100), (8, 12, 22))
     draw = ImageDraw.Draw(result)
     draw.rounded_rectangle((2, 2, 97, 97), radius=10, outline=(43, 66, 93), width=2)
-    for yy, value, font, ink in [(15, title, _font(14), (164, 195, 228)), (49, text, _font(11 if len(text)>8 else 14), color)]:
+    for yy, value, font, ink in [(15, title, _font(12 if op in ('scene_name', 'scene_slot') else 14), (164, 195, 228)), (49, text, _font(11 if len(text)>8 else 14), color)]:
         box = draw.textbbox((0, 0), value, font=font)
         draw.text(((100 - (box[2]-box[0]))/2-box[0], yy-box[1]), value, font=font, fill=ink)
     draw.rounded_rectangle((22, 83, 78, 88), radius=2, fill=color)
