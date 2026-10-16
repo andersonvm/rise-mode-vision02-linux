@@ -30,6 +30,9 @@ from vision02.studio_composition import clamp_drag, grid_coordinate
 from vision02.studio_tabs_layout import load_panel_width, save_panel_width
 from vision02.studio_visual_selection import hit_visual_element, visual_element_regions
 from vision02.studio_composition_v4 import nudge_state, guides_at_position, coordinate_caption
+from vision02.studio_layers_v5 import (
+    available_layers, hit_layer_candidates, next_overlapping_layer,
+)
 from vision02.studio_composition_v2 import (
     CompositionHistory, FIELDS, ZOOMS, state_from_fields, apply_state,
     default_target, smart_snap, anchors_for_target, display_geometry,
@@ -112,6 +115,7 @@ class StudioWindow(Adw.ApplicationWindow):
         self._composition_guide = (None, None)
         self._composition_zoom = 1.0
         self._composition_preview_path = None
+        self._composition_last_overlap = None
         self._syncing = False
         self._sidebar_save_timer = 0
         self._panel_save_timer = 0
@@ -457,6 +461,35 @@ class StudioWindow(Adw.ApplicationWindow):
         column.append(self.composition_target)
         self.composition_selected_label = _label('Seleção atual: Imagem', style='caption')
         column.append(self.composition_selected_label)
+        layers = Gtk.Expander(label='Camadas — seleção local')
+        layers.set_expanded(True)
+        column.append(layers)
+        layers_box = _box(False, 6)
+        layers_box.set_margin_top(6)
+        layers.set_child(layers_box)
+        layers_box.append(_label(
+            'Selecione uma camada sem alterar o YAML. A ordem de desenho no LCD '
+            'é fixa: Imagem atrás do Texto.', style='caption', wrap=True
+        ))
+        layer_row = _box(True, 6)
+        layers_box.append(layer_row)
+        self.composition_layer_buttons = {}
+        for layer, title in (('image', 'Imagem'), ('text', 'Texto')):
+            button = _button(layer_row, title,
+                             lambda _button, layer=layer: self._composition_select_layer(layer))
+            button.set_tooltip_text('Selecionar camada ' + title + ' para editar na Composição')
+            self.composition_layer_buttons[layer] = button
+        self.composition_layers_status = _label('Nenhuma tecla carregada.', style='caption')
+        layers_box.append(self.composition_layers_status)
+        self.composition_cycle_overlap = _button(
+            layers_box, 'Alternar camada no último ponto sobreposto',
+            self._composition_cycle_overlap_action, sensitive=False
+        )
+        layers_box.append(_label(
+            'Clique em uma sobreposição no preview, volte à Composição e use '
+            'Alternar; ou escolha Imagem/Texto acima. A seleção não reordena '
+            'os elementos nem modifica o dispositivo.', style='caption', wrap=True
+        ))
         self.composition_prefer_image = Gtk.CheckButton(
             label='Priorizar imagem quando imagem e texto se sobrepõem'
         )
@@ -563,6 +596,7 @@ class StudioWindow(Adw.ApplicationWindow):
         self.composition_status = _label('Aguardando prévia local da tecla selecionada.',
                                          style='caption', wrap=True)
         column.append(self.composition_status)
+        self._composition_update_layer_panel()
         column.append(_label('Imagem: posição e escala nos controles Aparência visual. '
                              'Texto: desloque diretamente, com os limites atuais de ±40 px. '
                              'Arrastar ativa a aparência personalizada.', wrap=True,
@@ -620,6 +654,23 @@ class StudioWindow(Adw.ApplicationWindow):
             )
             target = 'image' if self.composition_target.get_selected() == 0 else 'text'
             region = regions.get(target)
+            # Pistas discretas das camadas não selecionadas. São apenas linhas
+            # no overlay local; as duas chamadas rectangle() do alvo ativo
+            # permanecem idênticas para preservar a renderização legada.
+            for other, other_region in regions.items():
+                if other == target:
+                    continue
+                left, top = other_region.x, other_region.y
+                right, bottom = left + other_region.width, top + other_region.height
+                length = min(9, other_region.width / 3, other_region.height / 3)
+                cr.set_line_width(1.5)
+                cr.set_source_rgba(0.70, 0.75, 0.80, 0.70)
+                for px, py, sx, sy in ((left, top, 1, 1), (right, top, -1, 1),
+                                       (left, bottom, 1, -1), (right, bottom, -1, -1)):
+                    cr.move_to(px + sx*length, py)
+                    cr.line_to(px, py)
+                    cr.line_to(px, py + sy*length)
+                cr.stroke()
             if region is not None:
                 # Traço duplicado melhora o contraste em imagens claras e escuras.
                 cr.set_line_width(3.5)
@@ -643,6 +694,93 @@ class StudioWindow(Adw.ApplicationWindow):
         if hasattr(self, '_composition_update_coordinates'):
             self._composition_update_coordinates()
         self.composition_canvas.queue_draw()
+
+    def _composition_available_layers(self):
+        if self._quick_loaded is None:
+            return ()
+        return available_layers(
+            image_path=self.quick_image.get_text(),
+            text=self.quick_visual_text.get_text() or self.quick_label.get_text(),
+            show_text=self.style_show_text.get_active(),
+        )
+
+    def _composition_layer_regions(self):
+        area = self.composition_canvas
+        return visual_element_regions(
+            area.get_width(), area.get_height(), self._composition_zoom,
+            image_present=bool(self.quick_image.get_text().strip()),
+            image_x=int(self.style_numbers['image_x'].get_value()),
+            image_y=int(self.style_numbers['image_y'].get_value()),
+            image_scale=int(self.style_numbers['image_scale'].get_value()),
+            text=self.quick_visual_text.get_text() or self.quick_label.get_text(),
+            show_text=self.style_show_text.get_active(),
+            offset_x=int(self.style_numbers['offset_x'].get_value()),
+            offset_y=int(self.style_numbers['offset_y'].get_value()),
+            font_size=int(self.style_numbers['font_size'].get_value()),
+            horizontal=CHOICES['horizontal'][self.style_choices['horizontal'].get_selected()],
+            vertical=CHOICES['vertical'][self.style_choices['vertical'].get_selected()],
+        )
+
+    def _composition_update_layer_panel(self):
+        if not hasattr(self, 'composition_layer_buttons'):
+            return
+        active = self._quick_loaded is not None and 'quick_save' not in self._busy
+        layers = self._composition_available_layers()
+        target = 'image' if self.composition_target.get_selected() == 0 else 'text'
+        for key, button in self.composition_layer_buttons.items():
+            button.set_sensitive(active and key in layers)
+            if key == target and key in layers:
+                button.add_css_class('suggested-action')
+            else:
+                button.remove_css_class('suggested-action')
+        title = {'image': 'Imagem', 'text': 'Texto'}
+        text = ', '.join(title[key] for key in layers) if layers else 'nenhuma'
+        self.composition_layers_status.set_text('Camadas disponíveis: ' + text)
+        can_cycle = False
+        if active and self._composition_last_overlap is not None:
+            x, y = self._composition_last_overlap
+            can_cycle = len(hit_layer_candidates(self._composition_layer_regions(), x, y)) == 2
+        self.composition_cycle_overlap.set_sensitive(can_cycle)
+
+    def _composition_select_layer(self, layer):
+        # A camada é somente um alvo de edição: NÃO modifica o formulário,
+        # a ordem de renderização, o histórico, o YAML ou o serviço.
+        if (self._quick_loaded is None or 'quick_save' in self._busy
+                or layer not in self._composition_available_layers()):
+            return False
+        self.composition_target.set_selected(0 if layer == 'image' else 1)
+        # V3: a prioridade só influencia o hit-test nas regiões sobrepostas.
+        self.composition_prefer_image.set_active(layer == 'image')
+        self.composition_status.set_text(
+            ('Imagem' if layer == 'image' else 'Texto') +
+            ': camada selecionada para edição local (ordem de desenho preservada).'
+        )
+        self._composition_update_layer_panel()
+        self.composition_canvas.queue_draw()
+        return True
+
+    def _composition_capture_overlap(self, x, y):
+        if self._quick_loaded is None or 'quick_save' in self._busy:
+            self._composition_last_overlap = None
+        else:
+            regions = self._composition_layer_regions()
+            self._composition_last_overlap = (
+                (x, y) if len(hit_layer_candidates(regions, x, y)) == 2 else None
+            )
+        self._composition_update_layer_panel()
+
+    def _composition_cycle_overlap_action(self, *_):
+        if (self._quick_loaded is None or 'quick_save' in self._busy
+                or self._composition_last_overlap is None):
+            return False
+        x, y = self._composition_last_overlap
+        current = 'image' if self.composition_target.get_selected() == 0 else 'text'
+        next_layer = next_overlapping_layer(self._composition_layer_regions(), x, y, current)
+        if next_layer is None:
+            self._composition_last_overlap = None
+            self._composition_update_layer_panel()
+            return False
+        return self._composition_select_layer(next_layer)
 
     def _composition_selection_priority_changed(self, *_):
         # Apenas hit-test local; não modifica o perfil nem o estado dirty.
@@ -718,6 +856,8 @@ class StudioWindow(Adw.ApplicationWindow):
         if n_press != 1:
             return
         selected = self._composition_pick_target(x, y)
+        if hasattr(self, '_composition_capture_overlap'):
+            self._composition_capture_overlap(x, y)
         if selected is not None:
             self.quick_tabs.set_current_page(1 if selected == 'image' else 2)
             self.composition_status.set_text(
@@ -825,6 +965,8 @@ class StudioWindow(Adw.ApplicationWindow):
         self.composition_undo.set_sensitive(ready and bool(self._composition_history.undo_stack))
         self.composition_redo.set_sensitive(ready and bool(self._composition_history.redo_stack))
         self.composition_reset.set_sensitive(ready)
+        if hasattr(self, '_composition_update_layer_panel'):
+            self._composition_update_layer_panel()
         if hasattr(self, 'composition_nudge_buttons'):
             for button in self.composition_nudge_buttons:
                 button.set_sensitive(ready)
@@ -1060,6 +1202,8 @@ class StudioWindow(Adw.ApplicationWindow):
         # Redesenha a moldura junto com as alterações dos campos da aparência.
         if hasattr(self, 'composition_canvas'):
             self.composition_canvas.queue_draw()
+        if hasattr(self, '_composition_update_layer_panel'):
+            self._composition_update_layer_panel()
         if self._quick_updating or self._quick_loaded is None:
             return
         self._quick_changed()
@@ -1096,6 +1240,8 @@ class StudioWindow(Adw.ApplicationWindow):
         self._quick_changed()
 
     def _quick_changed(self, *_):
+        if hasattr(self, '_composition_update_layer_panel'):
+            self._composition_update_layer_panel()
         if self._quick_updating or self._quick_loaded is None:
             return
         self._quick_dirty = True
@@ -1128,6 +1274,7 @@ class StudioWindow(Adw.ApplicationWindow):
         self._composition_before_drag = None
         self._composition_guide = (None, None)
         self._composition_preview_path = None
+        self._composition_last_overlap = None
         self._composition_update_buttons()
         self._composition_pixbuf = None
         self.composition_picture.set_paintable(None)
