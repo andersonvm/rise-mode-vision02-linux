@@ -24,6 +24,7 @@ from gi.repository import Adw, Gdk, Gio, GLib, Gtk, Pango
 from vision02.editor_navigation import editor_args
 from vision02.studio_interaction import DoubleClickDetector
 from vision02.studio_inline_edit import KINDS, HINTS, key_to_form
+from vision02.studio_icon_gallery import filtered_icons, icon_by_path
 from vision02_studio_layout import (
     MIN_SIDEBAR_WIDTH, load_sidebar_width, save_sidebar_width,
 )
@@ -86,6 +87,10 @@ class StudioWindow(Adw.ApplicationWindow):
         self._quick_updating = False
         self._quick_saved = False
         self._icons = []
+        self._quick_icon_buttons = {}
+        self._quick_import_target = None
+        self._quick_preview_snapshot = None
+        self._quick_preview_queued = False
         self._syncing = False
         self._sidebar_save_timer = 0
 
@@ -199,6 +204,10 @@ class StudioWindow(Adw.ApplicationWindow):
                 color: #e5a327;
                 font-weight: bold;
             }
+            button.vision02-icon-selected {
+                border: 3px solid #3584e4;
+                background-color: rgba(53, 132, 228, 0.10);
+            }
         """)
         Gtk.StyleContext.add_provider_for_display(
             display, provider, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION
@@ -277,10 +286,37 @@ class StudioWindow(Adw.ApplicationWindow):
         box.append(_label('Imagem (caminho local)'))
         self.quick_image = Gtk.Entry()
         box.append(self.quick_image)
-        box.append(_label('Biblioteca de ícones'))
-        self.quick_icon_choice = Gtk.DropDown.new_from_strings(['— Escolher ícone —'])
-        box.append(self.quick_icon_choice)
-        _button(box, 'Usar ícone escolhido', self._quick_use_icon)
+        # Galeria embutida: usa os mesmos registros da página Ícones,
+        # mas seleciona diretamente o caminho da tecla em edição.
+        gallery = Gtk.Expander(label='Galeria visual de ícones')
+        gallery.set_expanded(True)
+        box.append(gallery)
+        gallery_box = _box(False, 7)
+        gallery.set_child(gallery_box)
+        self.quick_icon_search = Gtk.SearchEntry()
+        self.quick_icon_search.set_placeholder_text('Pesquisar por nome (ex.: OBS, Grafana)')
+        self.quick_icon_search.connect('search-changed', lambda *_: self._render_quick_icons())
+        gallery_box.append(self.quick_icon_search)
+        self.quick_icon_count = _label('Aguardando biblioteca…', style='caption')
+        gallery_box.append(self.quick_icon_count)
+        gallery_scroll = Gtk.ScrolledWindow()
+        gallery_scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        gallery_scroll.set_min_content_height(200)
+        gallery_scroll.set_size_request(-1, 220)
+        gallery_box.append(gallery_scroll)
+        self.quick_icon_flow = Gtk.FlowBox()
+        self.quick_icon_flow.set_selection_mode(Gtk.SelectionMode.NONE)
+        self.quick_icon_flow.set_max_children_per_line(3)
+        self.quick_icon_flow.set_row_spacing(5)
+        self.quick_icon_flow.set_column_spacing(5)
+        gallery_scroll.set_child(self.quick_icon_flow)
+        self.quick_import_icon_btn = _button(
+            gallery_box, 'Importar imagem para a galeria…',
+            lambda *_: self._choose_icon(for_quick=True)
+        )
+        gallery_box.append(_label('Um clique escolhe o ícone e gera uma prévia local. '
+                                  'Para alterar o LCD: Salvar YAML → Aplicar IPC.',
+                                  style='caption', wrap=True))
         box.append(_label('Ação'))
         self.quick_kind = Gtk.DropDown.new_from_strings(
             ['Sem ação (limpar)', 'Comando', 'URL', 'Script', 'Atalho', 'Trocar perfil', 'OBS']
@@ -323,6 +359,8 @@ class StudioWindow(Adw.ApplicationWindow):
         self.quick_preview_btn.set_sensitive(loaded and not busy)
         self.quick_save_btn.set_sensitive(loaded and not busy)
         self.quick_apply_btn.set_sensitive(loaded and self._quick_saved and not self._quick_dirty and not busy)
+        self.quick_icon_flow.set_sensitive(loaded and 'quick_save' not in self._busy)
+        self.quick_import_icon_btn.set_sensitive('import_icon' not in self._busy and 'quick_save' not in self._busy)
 
     def _quick_kind_changed(self, *_):
         kind = KINDS[self.quick_kind.get_selected()]
@@ -339,6 +377,7 @@ class StudioWindow(Adw.ApplicationWindow):
         self._quick_dirty = True
         self._quick_saved = False
         self.quick_state.set_text('Alterações não salvas — use Pré-visualizar e Salvar YAML.')
+        self._update_quick_icon_selection()
         self._quick_controls()
 
     def _quick_form(self):
@@ -351,6 +390,8 @@ class StudioWindow(Adw.ApplicationWindow):
     def _quick_load(self):
         if not self._current:
             return
+        self._quick_preview_snapshot = None
+        self._quick_preview_queued = False
         if self._quick_dirty:
             self.quick_state.set_text('Há alterações não salvas. Salve ou descarte antes de trocar de tecla.')
             return
@@ -366,12 +407,65 @@ class StudioWindow(Adw.ApplicationWindow):
         self._quick_loaded = None
         self._quick_load()
 
-    def _quick_use_icon(self, *_):
-        idx = self.quick_icon_choice.get_selected()
-        if idx < len(self._icons) and self._quick_loaded is not None:
-            path = self._icons[idx].get('path')
-            if isinstance(path, str):
-                self.quick_image.set_text(path)
+    def _update_quick_icon_selection(self):
+        """Realça a miniatura vinculada ao caminho atual, sem recriar botões."""
+        selected = self.quick_image.get_text()
+        for path, button in self._quick_icon_buttons.items():
+            if path == selected:
+                button.add_css_class('vision02-icon-selected')
+            else:
+                button.remove_css_class('vision02-icon-selected')
+
+    def _quick_pick_icon(self, _button, path):
+        if self._quick_loaded is None:
+            self.quick_state.set_text('Primeiro selecione uma tecla para editar.')
+            return
+        if 'quick_save' in self._busy:
+            self.quick_state.set_text('Aguarde o salvamento em andamento.')
+            return
+        if icon_by_path(self._icons, path) is None:
+            self.quick_state.set_text('Ícone indisponível: atualize a biblioteca.')
+            return
+        self.quick_image.set_text(path)
+        # Renderização local: não modifica YAML nem executa ações HID.
+        self._quick_preview()
+
+    def _render_quick_icons(self):
+        needle = self.quick_icon_search.get_text()
+        matching = filtered_icons(self._icons, needle)
+        self.quick_icon_count.set_text(
+            f'{len(matching)} miniaturas exibidas / {len(self._icons)} na biblioteca'
+            + (' (refine a pesquisa)' if len(matching) == 90 else '')
+        )
+        child = self.quick_icon_flow.get_first_child()
+        while child is not None:
+            following = child.get_next_sibling()
+            self.quick_icon_flow.remove(child)
+            child = following
+        self._quick_icon_buttons = {}
+        for icon in matching:
+            path = icon['path']
+            if not Path(path).is_file():
+                continue
+            button = Gtk.Button()
+            button.add_css_class('flat')
+            button.set_tooltip_text(icon['name'])
+            contents = _box(False, 3)
+            contents.set_halign(Gtk.Align.CENTER)
+            picture = Gtk.Picture.new_for_file(Gio.File.new_for_path(path))
+            picture.set_size_request(66, 66)
+            picture.set_content_fit(Gtk.ContentFit.CONTAIN)
+            contents.append(picture)
+            title = _label(icon['name'])
+            title.set_max_width_chars(11)
+            title.set_ellipsize(Pango.EllipsizeMode.END)
+            title.set_halign(Gtk.Align.CENTER)
+            contents.append(title)
+            button.set_child(contents)
+            button.connect('clicked', self._quick_pick_icon, path)
+            self.quick_icon_flow.insert(button, -1)
+            self._quick_icon_buttons[path] = button
+        self._update_quick_icon_selection()
 
     def _quick_preview(self, *_):
         if not self._quick_loaded:
@@ -380,6 +474,16 @@ class StudioWindow(Adw.ApplicationWindow):
             form = self._quick_form()
         except ValueError as exc:
             self.quick_state.set_text(str(exc)); return
+        if 'quick_preview' in self._busy:
+            # Vários cliques rápidos: descarta resultados antigos e gera
+            # a prévia final quando a primeira consulta terminar.
+            self._quick_preview_queued = True
+            self.quick_state.set_text('Aguardando prévia atualizada…')
+            return
+        self._quick_preview_snapshot = (
+            self._quick_loaded['profile'], self._quick_loaded['key_id'], form,
+        )
+        self._quick_preview_queued = False
         self._call('quick_preview', profile=self._quick_loaded['profile'],
                    key_id=self._quick_loaded['key_id'], sha256=self._quick_loaded['sha256'],
                    form=form)
@@ -412,6 +516,7 @@ class StudioWindow(Adw.ApplicationWindow):
                 self.quick_label.set_text(data['label'])
                 self.quick_visual_text.set_text(data['visual_text'])
                 self.quick_image.set_text(data['image'])
+                self._update_quick_icon_selection()
                 self.quick_kind.set_selected(KINDS.index(data['kind']))
                 for entry, value in zip(self.quick_fields, data['fields']):
                     entry.set_text(value)
@@ -423,10 +528,16 @@ class StudioWindow(Adw.ApplicationWindow):
         elif command == 'quick_preview':
             if not self._quick_loaded:
                 return
-            if (response['profile'], response['key_id']) != (self._quick_loaded['profile'], self._quick_loaded['key_id']):
-                return
-            self.quick_picture.set_file(Gio.File.new_for_path(response['image']))
-            self.quick_state.set_text('Pré-visualização local pronta; não alterou o dispositivo.')
+            latest = (self._quick_loaded['profile'], self._quick_loaded['key_id'], self._quick_form())
+            request_matches = self._quick_preview_snapshot == latest
+            response_matches = (response['profile'], response['key_id']) == latest[:2]
+            if request_matches and response_matches and not self._quick_preview_queued:
+                self.quick_picture.set_file(Gio.File.new_for_path(response['image']))
+                self.quick_state.set_text('Pré-visualização local pronta; não alterou o dispositivo.')
+            else:
+                # Não deixar uma imagem antiga sobrescrever a última escolha.
+                self._quick_preview_queued = False
+                self._quick_preview()
         elif command == 'quick_save':
             if not self._quick_loaded:
                 return
@@ -567,12 +678,20 @@ class StudioWindow(Adw.ApplicationWindow):
                 self.dashboard_state.set_text(f'Serviço indisponível: {message}')
             elif command.startswith('quick_'):
                 self.quick_state.set_text(f'Falha em {command}: {message}')
+                if command == 'quick_preview' and self._quick_preview_queued:
+                    self._quick_preview_queued = False
+                    self._quick_preview()
                 self._quick_controls()
             elif command == 'key_activity':
                 self.key_activity_label.set_text(
                     'Sem eventos via IPC: ' + str(message) +
                     '. Confirme o reinício de vision02.service.'
                 )
+            elif command == 'import_icon':
+                self._quick_import_target = None
+                self.top_status.set_text(f'Falha na importação da imagem: {message}')
+                if self.stack.get_visible_child_name() == 'keys':
+                    self.quick_state.set_text(f'Falha ao importar imagem: {message}')
             elif command == 'obs':
                 self.obs_state.set_text(f'OBS indisponível: {message}')
             elif command == 'system':
@@ -634,11 +753,21 @@ class StudioWindow(Adw.ApplicationWindow):
         elif command == 'icons':
             self._icons = response.get('icons') or []
             self._render_icons()
-            self.quick_icon_choice.set_model(Gtk.StringList.new(
-                [item.get('name', 'Ícone') for item in self._icons] or ['Nenhum ícone']
-            ))
+            self._render_quick_icons()
         elif command == 'import_icon':
+            target = self._quick_import_target
+            self._quick_import_target = None
             self._call('icons')
+            icon = response.get('icon') or {}
+            path = icon.get('path')
+            if (target == (self._current, self._selected_key)
+                    and self._quick_loaded is not None
+                    and isinstance(path, str)):
+                # A importação foi explicitamente iniciada neste painel.
+                # Se o perfil/tecla mudou durante o processamento, não aplica.
+                self.quick_image.set_text(path)
+                self._quick_preview()
+                self.quick_state.set_text('Imagem importada e selecionada; salve e aplique para atualizar o LCD.')
             self.top_status.set_text('Ícone importado para a biblioteca pessoal')
         elif command == 'system':
             metrics = response.get('metrics') or {}
@@ -842,7 +971,7 @@ class StudioWindow(Adw.ApplicationWindow):
             item.append(cap)
             self.icon_flow.insert(item, -1)
 
-    def _choose_icon(self, *_):
+    def _choose_icon(self, *_, for_quick=False):
         dialog = Gtk.FileChooserNative.new('Importar ícone', self,
                                            Gtk.FileChooserAction.OPEN,
                                            'Importar', 'Cancelar')
@@ -850,7 +979,12 @@ class StudioWindow(Adw.ApplicationWindow):
             if response == Gtk.ResponseType.ACCEPT:
                 selected = chooser.get_file()
                 if selected and selected.get_path():
-                    self._call('import_icon', path=selected.get_path())
+                    if 'import_icon' in self._busy:
+                        self.top_status.set_text('Uma importação já está em andamento.')
+                    else:
+                        self._quick_import_target = ((self._current, self._selected_key)
+                                                      if for_quick and self._quick_loaded is not None else None)
+                        self._call('import_icon', path=selected.get_path())
             chooser.destroy()
         dialog.connect('response', done)
         dialog.show()
