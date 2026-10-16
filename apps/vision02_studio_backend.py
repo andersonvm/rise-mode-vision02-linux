@@ -21,6 +21,8 @@ from vision02.icon_library import import_icon, list_icons
 from vision02.system_dashboard import LinuxSampler
 from vision02_gui_data import build_metadata
 from vision02.user_profiles import default_profile_paths
+from vision02_editor_backend import inspect_profile, preview_key, save_key
+from vision02.studio_inline_edit import form_to_key
 
 
 def run(command: str, body: dict | None = None, *, project: Path = ROOT) -> dict:
@@ -28,6 +30,29 @@ def run(command: str, body: dict | None = None, *, project: Path = ROOT) -> dict
     body = body or {}
     if not isinstance(body, dict):
         raise ValueError('Payload inválido')
+    if command in ('quick_inspect', 'quick_preview', 'quick_save'):
+        if command == 'quick_inspect':
+            if set(body) != {'profile', 'key_id'}:
+                raise ValueError('Informe perfil e tecla para edição')
+        elif set(body) != {'profile', 'key_id', 'sha256', 'form'}:
+            raise ValueError('Informe perfil, tecla, revisão e formulário')
+        name, key_id = body['profile'], body['key_id']
+        if not isinstance(name, str) or not name or type(key_id) is not int or not 1 <= key_id <= 15:
+            raise ValueError('Perfil ou número de tecla inválido')
+        if command == 'quick_inspect':
+            info = inspect_profile(project, name)
+            return {'ok': True, 'profile': name, 'key_id': key_id,
+                    'sha256': info['sha256'], 'edited': info['keys'][str(key_id)]}
+        expected = body['sha256']
+        if not isinstance(expected, str) or len(expected) != 64:
+            raise ValueError('Revisão SHA-256 inválida')
+        edited = form_to_key(body['form'])
+        if command == 'quick_preview':
+            result = preview_key(project, name, key_id, edited, expected)
+            return {'ok': True, 'profile': name, 'key_id': key_id,
+                    'image': result['previews'][str(key_id)]['image']}
+        return {'ok': True, 'profile': name, 'key_id': key_id,
+                **save_key(project, name, key_id, edited, expected)}
     if command == 'status':
         if body:
             raise ValueError('status não recebe argumentos')
@@ -80,6 +105,7 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description='Vision 02 Studio — backend JSON seguro')
     parser.add_argument('--command', required=True,
                         choices=('status', 'switch', 'reload', 'previews', 'live_preview', 'key_activity', 'icons',
+                                 'quick_inspect', 'quick_preview', 'quick_save',
                                  'import_icon', 'system', 'obs'))
     args = parser.parse_args(argv)
     try:

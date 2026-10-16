@@ -23,6 +23,7 @@ from gi.repository import Adw, Gdk, Gio, GLib, Gtk, Pango
 
 from vision02.editor_navigation import editor_args
 from vision02.studio_interaction import DoubleClickDetector
+from vision02.studio_inline_edit import KINDS, HINTS, key_to_form
 from vision02_studio_layout import (
     MIN_SIDEBAR_WIDTH, load_sidebar_width, save_sidebar_width,
 )
@@ -80,6 +81,10 @@ class StudioWindow(Adw.ApplicationWindow):
         self._key_number_labels = {}
         self._key_status_labels = {}
         self._key_highlight_css = None
+        self._quick_loaded = None
+        self._quick_dirty = False
+        self._quick_updating = False
+        self._quick_saved = False
         self._icons = []
         self._syncing = False
         self._sidebar_save_timer = 0
@@ -213,11 +218,31 @@ class StudioWindow(Adw.ApplicationWindow):
         row.append(self.profile_combo)
         _button(row, 'Atualizar prévias', lambda *_: self._call('previews'))
         _button(row, 'Editar tecla selecionada', self._edit_selected_key)
+        # A grade pode rolar horizontalmente em janelas pequenas; as propriedades
+        # ficam disponíveis numa segunda coluna, sem comprimir os 15 LCDs.
+        editor_split = Gtk.Paned.new(Gtk.Orientation.HORIZONTAL)
+        editor_split.set_wide_handle(True)
+        editor_split.set_position(665)
+        editor_split.set_resize_start_child(True)
+        editor_split.set_resize_end_child(False)
+        editor_split.set_shrink_start_child(False)
+        editor_split.set_shrink_end_child(False)
+        editor_split.set_vexpand(True)
+        page.append(editor_split)
+        key_scroll = Gtk.ScrolledWindow()
+        key_scroll.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
+        key_scroll.set_min_content_height(510)
+        grid_box = _box(False, 12)
+        key_scroll.set_child(grid_box)
+        editor_split.set_start_child(key_scroll)
         self.key_grid = Gtk.Grid(column_spacing=8, row_spacing=8)
         self.key_grid.set_column_homogeneous(True)
-        page.append(self.key_grid)
+        grid_box.append(self.key_grid)
         self.key_activity_label = _label('Pressione uma tecla física para verificar o destaque.', wrap=True)
-        page.append(self.key_activity_label)
+        grid_box.append(self.key_activity_label)
+        self.key_detail = _label('Selecione uma tecla.', wrap=True)
+        grid_box.append(self.key_detail)
+        self._build_quick_properties(editor_split)
         self.key_buttons = {}
         for ident in range(1, 16):
             button = Gtk.Button()
@@ -226,9 +251,193 @@ class StudioWindow(Adw.ApplicationWindow):
             button.connect('clicked', self._key_selected, ident)
             self.key_grid.attach(button, (ident - 1) % 5, (ident - 1) // 5, 1, 1)
             self.key_buttons[ident] = button
-        self.key_detail = _label('Selecione uma tecla.', wrap=True)
-        page.append(self.key_detail)
         self._render_keys()
+
+    def _build_quick_properties(self, editor_split):
+        props_scroll = Gtk.ScrolledWindow()
+        props_scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        props_scroll.set_min_content_width(295)
+        box = _box(False, 9)
+        box.set_margin_start(14)
+        box.set_margin_end(10)
+        box.set_margin_top(6)
+        box.set_margin_bottom(16)
+        props_scroll.set_child(box)
+        editor_split.set_end_child(props_scroll)
+        box.append(_label('Propriedades da tecla', style='title-3'))
+        self.quick_target = _label('Selecione uma tecla para editar.', wrap=True)
+        box.append(self.quick_target)
+        box.append(_label('Rótulo'))
+        self.quick_label = Gtk.Entry()
+        box.append(self.quick_label)
+        box.append(_label('Texto visual no LCD (opcional)'))
+        self.quick_visual_text = Gtk.Entry()
+        self.quick_visual_text.set_placeholder_text('Vazio: usa o rótulo da tecla')
+        box.append(self.quick_visual_text)
+        box.append(_label('Imagem (caminho local)'))
+        self.quick_image = Gtk.Entry()
+        box.append(self.quick_image)
+        box.append(_label('Biblioteca de ícones'))
+        self.quick_icon_choice = Gtk.DropDown.new_from_strings(['— Escolher ícone —'])
+        box.append(self.quick_icon_choice)
+        _button(box, 'Usar ícone escolhido', self._quick_use_icon)
+        box.append(_label('Ação'))
+        self.quick_kind = Gtk.DropDown.new_from_strings(
+            ['Sem ação (limpar)', 'Comando', 'URL', 'Script', 'Atalho', 'Trocar perfil', 'OBS']
+        )
+        box.append(self.quick_kind)
+        self.quick_hint = _label('', style='caption', wrap=True)
+        box.append(self.quick_hint)
+        self.quick_fields = []
+        for idx in range(4):
+            entry = Gtk.Entry()
+            entry.set_placeholder_text(f'Campo {idx + 1}')
+            self.quick_fields.append(entry)
+            box.append(entry)
+        self.quick_kind.connect('notify::selected', self._quick_kind_changed)
+        for entry in (self.quick_label, self.quick_visual_text, self.quick_image, *self.quick_fields):
+            entry.connect('changed', self._quick_changed)
+        self.quick_state = _label('Aguardando seleção…', wrap=True)
+        box.append(self.quick_state)
+        self.quick_picture = Gtk.Picture()
+        self.quick_picture.set_size_request(100, 100)
+        self.quick_picture.set_content_fit(Gtk.ContentFit.CONTAIN)
+        box.append(self.quick_picture)
+        btns = _box(False, 6)
+        box.append(btns)
+        self.quick_preview_btn = _button(btns, 'Pré-visualizar (local)', self._quick_preview)
+        self.quick_save_btn = _button(btns, 'Salvar YAML com backup', self._quick_save)
+        self.quick_apply_btn = _button(btns, 'Aplicar ao dispositivo (IPC)', self._quick_apply)
+        _button(btns, 'Descartar edição / recarregar', self._quick_discard)
+        _button(box, 'Editor avançado de aparência…', self._edit_selected_key)
+        box.append(_label('Salvar não aplica automaticamente. Nenhum clique aqui executa ações. '
+                          'Aparência avançada é preservada.', style='caption', wrap=True))
+        self._quick_kind_changed()
+        self._quick_controls()
+
+    def _quick_controls(self):
+        loaded = self._quick_loaded is not None
+        for widget in (self.quick_label, self.quick_visual_text, self.quick_image, self.quick_kind, *self.quick_fields):
+            widget.set_sensitive(loaded and 'quick_save' not in self._busy)
+        busy = 'quick_save' in self._busy or 'quick_preview' in self._busy
+        self.quick_preview_btn.set_sensitive(loaded and not busy)
+        self.quick_save_btn.set_sensitive(loaded and not busy)
+        self.quick_apply_btn.set_sensitive(loaded and self._quick_saved and not self._quick_dirty and not busy)
+
+    def _quick_kind_changed(self, *_):
+        kind = KINDS[self.quick_kind.get_selected()]
+        self.quick_hint.set_text(HINTS[kind])
+        count = {'none': 0, 'command': 1, 'url': 1, 'hotkey': 1,
+                 'profile': 1, 'script': 3, 'obs': 4}[kind]
+        for i, field in enumerate(self.quick_fields):
+            field.set_visible(i < count)
+        self._quick_changed()
+
+    def _quick_changed(self, *_):
+        if self._quick_updating or self._quick_loaded is None:
+            return
+        self._quick_dirty = True
+        self._quick_saved = False
+        self.quick_state.set_text('Alterações não salvas — use Pré-visualizar e Salvar YAML.')
+        self._quick_controls()
+
+    def _quick_form(self):
+        return {'label': self.quick_label.get_text(), 'image': self.quick_image.get_text(),
+                'visual_text': self.quick_visual_text.get_text(),
+                'kind': KINDS[self.quick_kind.get_selected()],
+                'fields': [entry.get_text() for entry in self.quick_fields],
+                'appearance': self._quick_loaded['edited'].get('appearance')}
+
+    def _quick_load(self):
+        if not self._current:
+            return
+        if self._quick_dirty:
+            self.quick_state.set_text('Há alterações não salvas. Salve ou descarte antes de trocar de tecla.')
+            return
+        self._quick_loaded = None
+        self._quick_saved = False
+        self.quick_target.set_text(f'{self._current} · tecla física {self._selected_key:02d}')
+        self.quick_state.set_text('Carregando propriedades…')
+        self._quick_controls()
+        self._call('quick_inspect', profile=self._current, key_id=self._selected_key)
+
+    def _quick_discard(self, *_):
+        self._quick_dirty = False
+        self._quick_loaded = None
+        self._quick_load()
+
+    def _quick_use_icon(self, *_):
+        idx = self.quick_icon_choice.get_selected()
+        if idx < len(self._icons) and self._quick_loaded is not None:
+            path = self._icons[idx].get('path')
+            if isinstance(path, str):
+                self.quick_image.set_text(path)
+
+    def _quick_preview(self, *_):
+        if not self._quick_loaded:
+            return
+        try:
+            form = self._quick_form()
+        except ValueError as exc:
+            self.quick_state.set_text(str(exc)); return
+        self._call('quick_preview', profile=self._quick_loaded['profile'],
+                   key_id=self._quick_loaded['key_id'], sha256=self._quick_loaded['sha256'],
+                   form=form)
+        self.quick_state.set_text('Gerando prévia local…')
+
+    def _quick_save(self, *_):
+        if not self._quick_loaded:
+            return
+        self._call('quick_save', profile=self._quick_loaded['profile'],
+                   key_id=self._quick_loaded['key_id'], sha256=self._quick_loaded['sha256'],
+                   form=self._quick_form())
+        self.quick_state.set_text('Validando YAML e salvando com backup…')
+        self._quick_controls()
+
+    def _quick_apply(self, *_):
+        if self._quick_saved and not self._quick_dirty:
+            self._call('reload')
+            self.quick_state.set_text('Aplicando configuração ao dispositivo via IPC…')
+
+    def _quick_received(self, command, response):
+        if command == 'quick_inspect':
+            if response['profile'] != self._current or response['key_id'] != self._selected_key:
+                # Usuário trocou tecla durante a consulta anterior.
+                self._quick_load()
+                return
+            self._quick_loaded = response
+            self._quick_updating = True
+            try:
+                data = key_to_form(response['edited'])
+                self.quick_label.set_text(data['label'])
+                self.quick_visual_text.set_text(data['visual_text'])
+                self.quick_image.set_text(data['image'])
+                self.quick_kind.set_selected(KINDS.index(data['kind']))
+                for entry, value in zip(self.quick_fields, data['fields']):
+                    entry.set_text(value)
+            finally:
+                self._quick_updating = False
+            self._quick_dirty = False
+            self._quick_saved = False
+            self.quick_state.set_text('Pronta para editar. Alterações só são salvas ao clicar em Salvar YAML.')
+        elif command == 'quick_preview':
+            if not self._quick_loaded:
+                return
+            if (response['profile'], response['key_id']) != (self._quick_loaded['profile'], self._quick_loaded['key_id']):
+                return
+            self.quick_picture.set_file(Gio.File.new_for_path(response['image']))
+            self.quick_state.set_text('Pré-visualização local pronta; não alterou o dispositivo.')
+        elif command == 'quick_save':
+            if not self._quick_loaded:
+                return
+            if (response['profile'], response['key_id']) != (self._quick_loaded['profile'], self._quick_loaded['key_id']):
+                return
+            self._quick_loaded['sha256'] = response['sha256']
+            self._quick_loaded['edited'] = self._quick_form()  # a próxima edição preserva appearance
+            self._quick_dirty = False
+            self._quick_saved = True
+            self.quick_state.set_text('YAML salvo com backup em ' + response['backup'] + '. Clique em Aplicar ao dispositivo.')
+        self._quick_controls()
 
     def _build_profiles(self):
         page = self._page('profiles', 'Perfis',
@@ -356,6 +565,9 @@ class StudioWindow(Adw.ApplicationWindow):
             if command == 'status':
                 self.top_status.set_text('Serviço indisponível')
                 self.dashboard_state.set_text(f'Serviço indisponível: {message}')
+            elif command.startswith('quick_'):
+                self.quick_state.set_text(f'Falha em {command}: {message}')
+                self._quick_controls()
             elif command == 'key_activity':
                 self.key_activity_label.set_text(
                     'Sem eventos via IPC: ' + str(message) +
@@ -368,6 +580,9 @@ class StudioWindow(Adw.ApplicationWindow):
             else:
                 self.top_status.set_text(f'{command}: {message}')
             return False
+        if command in {'quick_inspect', 'quick_preview', 'quick_save'}:
+            self._quick_received(command, response)
+            return False
         if command in {'status', 'switch', 'reload'}:
             if command == 'reload':
                 self._call('previews')
@@ -376,7 +591,12 @@ class StudioWindow(Adw.ApplicationWindow):
             if command != 'status':
                 return False
             self._connected = bool(response.get('connected'))
+            before_profile = self._current
             self._current = str(response.get('active') or '')
+            if self._current and self._current != before_profile and not self._quick_dirty:
+                self._quick_load()
+            elif self._current != before_profile and self._quick_dirty:
+                self.quick_state.set_text('Perfil ativo mudou. Salve ou descarte a edição pendente.')
             profiles = response.get('profiles') or []
             if profiles != self._profiles:
                 self._profiles = profiles
@@ -414,6 +634,9 @@ class StudioWindow(Adw.ApplicationWindow):
         elif command == 'icons':
             self._icons = response.get('icons') or []
             self._render_icons()
+            self.quick_icon_choice.set_model(Gtk.StringList.new(
+                [item.get('name', 'Ícone') for item in self._icons] or ['Nenhum ícone']
+            ))
         elif command == 'import_icon':
             self._call('icons')
             self.top_status.set_text('Ícone importado para a biblioteca pessoal')
@@ -459,6 +682,10 @@ class StudioWindow(Adw.ApplicationWindow):
     def _profile_selected(self, widget, _param):
         if self._syncing or not self._connected:
             return
+        if self._quick_dirty:
+            self.quick_state.set_text('Salve ou descarte a edição antes de trocar o perfil.')
+            self._update_combo()
+            return
         index = widget.get_selected()
         if index < len(self._profiles):
             target = self._profiles[index]
@@ -486,10 +713,16 @@ class StudioWindow(Adw.ApplicationWindow):
         Não recriar filhos do botão durante o primeiro clique: isso pode
         interromper a sequência do gesto duplo em algumas versões de GTK.
         """
+        if key_id != self._selected_key and self._quick_dirty:
+            self.quick_state.set_text('Salve ou descarte as alterações antes de selecionar outra tecla.')
+            return
         double_click = self._click_detector.click(key_id)
+        changed = key_id != self._selected_key
         self._selected_key = key_id
         self._update_key_highlight()
         self._update_key_detail()
+        if changed:
+            self._quick_load()
         if double_click:
             self._edit_selected_key()
 
@@ -682,6 +915,10 @@ class StudioWindow(Adw.ApplicationWindow):
         return False
 
     def _on_close(self, *_):
+        if self._quick_dirty:
+            self.quick_state.set_text('Há alterações não salvas. Salve ou descarte antes de fechar.')
+            self.stack.set_visible_child_name('keys')
+            return True
         if self._sidebar_save_timer:
             GLib.source_remove(self._sidebar_save_timer)
             self._persist_sidebar_width()
