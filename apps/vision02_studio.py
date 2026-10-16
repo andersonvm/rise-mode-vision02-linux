@@ -28,6 +28,7 @@ from vision02.studio_icon_gallery import filtered_icons, icon_by_path
 from vision02.studio_visual_style import CHOICES, INT_RANGES, IMAGE_RANGES, COLORS, ui_appearance, validated_appearance, hex_from_rgb
 from vision02.studio_composition import clamp_drag, grid_coordinate
 from vision02.studio_tabs_layout import load_panel_width, save_panel_width
+from vision02.studio_visual_selection import hit_visual_element
 from vision02.studio_composition_v2 import (
     CompositionHistory, FIELDS, ZOOMS, state_from_fields, apply_state,
     default_target, smart_snap, anchors_for_target, display_geometry,
@@ -106,6 +107,7 @@ class StudioWindow(Adw.ApplicationWindow):
         self._composition_history = CompositionHistory()
         self._composition_before_drag = None
         self._composition_drag_kind = 'move'
+        self._composition_drag_did_move = False
         self._composition_guide = (None, None)
         self._composition_zoom = 1.0
         self._composition_preview_path = None
@@ -446,8 +448,9 @@ class StudioWindow(Adw.ApplicationWindow):
         column = _box(False, 6)
         column.set_margin_top(8)
         group.set_child(column)
-        column.append(_label('A prévia ampliada é carregada automaticamente ao selecionar a tecla. '
-                             'Arraste dentro da borda azul para editar a posição.',
+        column.append(_label('Clique no texto ou na imagem para abrir suas propriedades; '
+                             'arraste o elemento para ajustar sua posição. '
+                             'Áreas de seleção são aproximadas.',
                              wrap=True, style='caption'))
         self.composition_target = Gtk.DropDown.new_from_strings(['Imagem', 'Texto'])
         column.append(self.composition_target)
@@ -517,6 +520,12 @@ class StudioWindow(Adw.ApplicationWindow):
         gesture.connect('drag-update', self._composition_drag_update)
         gesture.connect('drag-end', self._composition_drag_end)
         self.composition_surface.add_controller(gesture)
+        # Clique simples seleciona e abre a aba; arrastar permanece em Composição.
+        click = Gtk.GestureClick.new()
+        click.set_button(1)
+        click.connect('pressed', self._composition_click_pressed)
+        click.connect('released', self._composition_click_released)
+        self.composition_surface.add_controller(click)
         self.composition_status = _label('Aguardando prévia local da tecla selecionada.',
                                          style='caption', wrap=True)
         column.append(self.composition_status)
@@ -564,6 +573,47 @@ class StudioWindow(Adw.ApplicationWindow):
         self._composition_update_buttons()
         self.composition_canvas.queue_draw()
 
+    def _composition_pick_target(self, x, y):
+        # Hit-test local sobre o preview composto, sem ler/gravar o YAML.
+        if self._quick_loaded is None or 'quick_save' in self._busy:
+            return None
+        area = self.composition_canvas
+        selected = hit_visual_element(
+            x, y, area.get_width(), area.get_height(), self._composition_zoom,
+            image_present=bool(self.quick_image.get_text().strip()),
+            image_x=int(self.style_numbers['image_x'].get_value()),
+            image_y=int(self.style_numbers['image_y'].get_value()),
+            image_scale=int(self.style_numbers['image_scale'].get_value()),
+            text=self.quick_visual_text.get_text() or self.quick_label.get_text(),
+            show_text=self.style_show_text.get_active(),
+            offset_x=int(self.style_numbers['offset_x'].get_value()),
+            offset_y=int(self.style_numbers['offset_y'].get_value()),
+            font_size=int(self.style_numbers['font_size'].get_value()),
+            horizontal=CHOICES['horizontal'][self.style_choices['horizontal'].get_selected()],
+            vertical=CHOICES['vertical'][self.style_choices['vertical'].get_selected()],
+        )
+        if selected is not None:
+            self.composition_target.set_selected(0 if selected == 'image' else 1)
+        return selected
+
+    def _composition_click_pressed(self, *_):
+        self._composition_drag_did_move = False
+
+    def _composition_click_released(self, _gesture, n_press, x, y):
+        # Movimentação (inclusive pela alça) nunca muda automaticamente de aba.
+        if self._composition_drag_did_move:
+            self._composition_drag_did_move = False
+            return
+        if n_press != 1:
+            return
+        selected = self._composition_pick_target(x, y)
+        if selected is not None:
+            self.quick_tabs.set_current_page(1 if selected == 'image' else 2)
+            self.composition_status.set_text(
+                ('Imagem' if selected == 'image' else 'Texto') +
+                ': propriedades selecionadas; volte a Composição para arrastar.'
+            )
+
     def _composition_resize_drag_begin(self, gesture, _x, _y):
         # O gesto origina-se na própria alça, não nas coordenadas da imagem:
         # é redimensionamento SEMPRE, independentemente de zoom, recorte ou
@@ -572,6 +622,7 @@ class StudioWindow(Adw.ApplicationWindow):
         if self._composition_before_drag is None:
             return
         self._composition_drag_kind = 'resize'
+        self._composition_drag_did_move = True
         self.composition_status.set_text('Redimensionando imagem pela alça ↘…')
         gesture.set_state(Gtk.EventSequenceState.CLAIMED)
 
@@ -579,6 +630,12 @@ class StudioWindow(Adw.ApplicationWindow):
         self._composition_before_drag = None
         if self._quick_loaded is None or 'quick_save' in self._busy:
             self.composition_status.set_text('Selecione uma tecla e aguarde suas propriedades.')
+            return
+        self._composition_drag_did_move = False
+        # O arrasto iniciado pelo GTK exige hit-test. Chamadas sem gesto são
+        # usadas pela alça separada e pelos testes legados da composição.
+        if _gesture is not None and self._composition_pick_target(x, y) is None:
+            self.composition_status.set_text('Clique sobre a imagem ou o texto para selecionar.')
             return
         if not self.style_enabled.get_active():
             self.style_enabled.set_active(True)
@@ -602,6 +659,8 @@ class StudioWindow(Adw.ApplicationWindow):
         if (self._quick_loaded is None or 'quick_save' in self._busy
                 or not self.style_enabled.get_active() or self._composition_before_drag is None):
             return
+        if offset_x or offset_y:
+            self._composition_drag_did_move = True
         target = ('image_x', 'image_y') if self.composition_target.get_selected() == 0 else ('offset_x', 'offset_y')
         extent = min(self.composition_canvas.get_width(), self.composition_canvas.get_height())
         if extent <= 0:
