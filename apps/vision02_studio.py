@@ -28,7 +28,7 @@ from vision02.studio_icon_gallery import filtered_icons, icon_by_path
 from vision02.studio_visual_style import CHOICES, INT_RANGES, IMAGE_RANGES, COLORS, ui_appearance, validated_appearance, hex_from_rgb
 from vision02.studio_composition import clamp_drag, grid_coordinate
 from vision02.studio_tabs_layout import load_panel_width, save_panel_width
-from vision02.studio_visual_selection import hit_visual_element
+from vision02.studio_visual_selection import hit_visual_element, visual_element_regions
 from vision02.studio_composition_v2 import (
     CompositionHistory, FIELDS, ZOOMS, state_from_fields, apply_state,
     default_target, smart_snap, anchors_for_target, display_geometry,
@@ -448,12 +448,19 @@ class StudioWindow(Adw.ApplicationWindow):
         column = _box(False, 6)
         column.set_margin_top(8)
         group.set_child(column)
-        column.append(_label('Clique no texto ou na imagem para abrir suas propriedades; '
-                             'arraste o elemento para ajustar sua posição. '
-                             'Áreas de seleção são aproximadas.',
+        column.append(_label('Clique em um elemento para abrir suas propriedades; '
+                             'arraste para ajustar sua posição. A moldura mostra '
+                             'a área aproximada selecionável (não os pixels exatos).',
                              wrap=True, style='caption'))
         self.composition_target = Gtk.DropDown.new_from_strings(['Imagem', 'Texto'])
         column.append(self.composition_target)
+        self.composition_selected_label = _label('Seleção atual: Imagem', style='caption')
+        column.append(self.composition_selected_label)
+        self.composition_prefer_image = Gtk.CheckButton(
+            label='Priorizar imagem quando imagem e texto se sobrepõem'
+        )
+        self.composition_prefer_image.connect('toggled', self._composition_selection_priority_changed)
+        column.append(self.composition_prefer_image)
         self.composition_grid = Gtk.CheckButton(label='Encaixar na grade de 5 pixels')
         column.append(self.composition_grid)
         zoom_row = _box(True, 8)
@@ -567,10 +574,49 @@ class StudioWindow(Adw.ApplicationWindow):
             cr.move_to(0, cy + gy*unit)
             cr.line_to(width, cy + gy*unit)
         cr.stroke()
-        # A alça é um Gtk.Frame separado, não depende desta camada Cairo.
+        # Moldura da seleção: mesma geometria (com recorte e zoom) usada
+        # pelo hit-test. Não muda o PNG, nem salva ou aplica configurações.
+        if self._quick_loaded is not None:
+            regions = visual_element_regions(
+                width, height, self._composition_zoom,
+                image_present=bool(self.quick_image.get_text().strip()),
+                image_x=int(self.style_numbers['image_x'].get_value()),
+                image_y=int(self.style_numbers['image_y'].get_value()),
+                image_scale=int(self.style_numbers['image_scale'].get_value()),
+                text=self.quick_visual_text.get_text() or self.quick_label.get_text(),
+                show_text=self.style_show_text.get_active(),
+                offset_x=int(self.style_numbers['offset_x'].get_value()),
+                offset_y=int(self.style_numbers['offset_y'].get_value()),
+                font_size=int(self.style_numbers['font_size'].get_value()),
+                horizontal=CHOICES['horizontal'][self.style_choices['horizontal'].get_selected()],
+                vertical=CHOICES['vertical'][self.style_choices['vertical'].get_selected()],
+            )
+            target = 'image' if self.composition_target.get_selected() == 0 else 'text'
+            region = regions.get(target)
+            if region is not None:
+                # Traço duplicado melhora o contraste em imagens claras e escuras.
+                cr.set_line_width(3.5)
+                cr.set_source_rgba(0.04, 0.08, 0.14, 0.95)
+                cr.rectangle(region.x, region.y, region.width, region.height)
+                cr.stroke()
+                cr.set_line_width(2.0)
+                cr.set_source_rgba(*( (0.22, 0.85, 1.0, 1.0) if target == 'image'
+                                     else (1.0, 0.78, 0.25, 1.0)))
+                cr.rectangle(region.x, region.y, region.width, region.height)
+                cr.stroke()
+        # A alça real é um Gtk.Frame separado e continua recebendo o gesto.
 
     def _composition_target_changed(self, *_):
+        if hasattr(self, 'composition_selected_label'):
+            self.composition_selected_label.set_text(
+                'Seleção atual: Imagem' if self.composition_target.get_selected() == 0
+                else 'Seleção atual: Texto'
+            )
         self._composition_update_buttons()
+        self.composition_canvas.queue_draw()
+
+    def _composition_selection_priority_changed(self, *_):
+        # Apenas hit-test local; não modifica o perfil nem o estado dirty.
         self.composition_canvas.queue_draw()
 
     def _composition_pick_target(self, x, y):
@@ -591,6 +637,8 @@ class StudioWindow(Adw.ApplicationWindow):
             font_size=int(self.style_numbers['font_size'].get_value()),
             horizontal=CHOICES['horizontal'][self.style_choices['horizontal'].get_selected()],
             vertical=CHOICES['vertical'][self.style_choices['vertical'].get_selected()],
+            prefer=('image' if getattr(self, 'composition_prefer_image', None) is not None
+                    and self.composition_prefer_image.get_active() else 'text'),
         )
         if selected is not None:
             self.composition_target.set_selected(0 if selected == 'image' else 1)
@@ -929,6 +977,9 @@ class StudioWindow(Adw.ApplicationWindow):
 
     def _visual_style_changed(self, *_):
         self._update_style_sensitivity()
+        # Redesenha a moldura junto com as alterações dos campos da aparência.
+        if hasattr(self, 'composition_canvas'):
+            self.composition_canvas.queue_draw()
         if self._quick_updating or self._quick_loaded is None:
             return
         self._quick_changed()
