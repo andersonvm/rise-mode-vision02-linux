@@ -21,7 +21,7 @@ from vision02.icon_library import import_icon, list_icons
 from vision02.system_dashboard import LinuxSampler
 from vision02_gui_data import build_metadata
 from vision02.user_profiles import default_profile_paths
-from vision02_editor_backend import inspect_profile, preview_key, save_key
+from vision02_editor_backend import inspect_profile, preview_key, save_key, save_batch_appearance
 from vision02.studio_inline_edit import form_to_key
 
 
@@ -42,7 +42,9 @@ def run(command: str, body: dict | None = None, *, project: Path = ROOT) -> dict
         if command == 'quick_inspect':
             info = inspect_profile(project, name)
             return {'ok': True, 'profile': name, 'key_id': key_id,
-                    'sha256': info['sha256'], 'edited': info['keys'][str(key_id)]}
+                    'sha256': info['sha256'], 'edited': info['keys'][str(key_id)],
+                    'configured_keys': [int(k) for k, v in info['keys'].items()
+                                        if v['action'].get('type') != 'none']}
         expected = body['sha256']
         if not isinstance(expected, str) or len(expected) != 64:
             raise ValueError('Revisão SHA-256 inválida')
@@ -55,6 +57,18 @@ def run(command: str, body: dict | None = None, *, project: Path = ROOT) -> dict
                     'components': result.get('components', {})}
         return {'ok': True, 'profile': name, 'key_id': key_id,
                 **save_key(project, name, key_id, edited, expected)}
+    if command == 'quick_batch_appearance':
+        if set(body) != {'profile', 'source_key', 'targets', 'sha256'}:
+            raise ValueError('Informe perfil, origem, destinos e revisão SHA-256')
+        name = body['profile']
+        expected = body['sha256']
+        if not isinstance(name, str) or not name:
+            raise ValueError('Perfil inválido')
+        if not isinstance(expected, str) or len(expected) != 64 or any(
+                c not in '0123456789abcdef' for c in expected):
+            raise ValueError('Revisão SHA-256 inválida')
+        return {'profile': name, **save_batch_appearance(
+            project, name, body['source_key'], body['targets'], expected)}
     if command == 'status':
         if body:
             raise ValueError('status não recebe argumentos')
@@ -107,7 +121,7 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description='Vision 02 Studio — backend JSON seguro')
     parser.add_argument('--command', required=True,
                         choices=('status', 'switch', 'reload', 'previews', 'live_preview', 'key_activity', 'icons',
-                                 'quick_inspect', 'quick_preview', 'quick_save',
+                                 'quick_inspect', 'quick_preview', 'quick_save', 'quick_batch_appearance',
                                  'import_icon', 'system', 'obs'))
     args = parser.parse_args(argv)
     try:

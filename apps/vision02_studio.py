@@ -103,6 +103,9 @@ class StudioWindow(Adw.ApplicationWindow):
         self._quick_dirty = False
         self._quick_updating = False
         self._quick_saved = False
+        self._quick_batch_clipboard = None  # origem persistida, perfil e SHA
+        self._quick_batch_configured = set()
+        self._quick_batch_pending_apply = False
         self._icons = []
         self._quick_icon_buttons = {}
         self._quick_import_target = None
@@ -419,6 +422,12 @@ class StudioWindow(Adw.ApplicationWindow):
         self.quick_picture.set_size_request(100, 100)
         self.quick_picture.set_content_fit(Gtk.ContentFit.CONTAIN)
         image_box.append(self.quick_picture)
+        batch_expander = Gtk.Expander(label='Copiar aparência para outras teclas (lote)')
+        image_box.append(batch_expander)
+        batch_box = _box(False, 7)
+        batch_box.set_margin_top(10)
+        batch_expander.set_child(batch_box)
+        self._build_batch_appearance_v9(batch_box)
 
         # Aba Texto: rótulo, texto no LCD, tipografia, cores e alinhamento.
         text_box.append(_label('Rótulo'))
@@ -454,6 +463,110 @@ class StudioWindow(Adw.ApplicationWindow):
                              style='caption', wrap=True))
         self._quick_kind_changed()
         self._quick_controls()
+
+    def _build_batch_appearance_v9(self, parent):
+        parent.append(_label('Copiar aparência para outras teclas', style='title-4'))
+        parent.append(_label('Copia imagem, texto visual e estilo salvos no YAML. '
+                             'Não copia rótulo, ação, atalhos, comandos ou OBS. '
+                             'Somente teclas já configuradas no perfil atual.', wrap=True))
+        self.quick_batch_source = _label('Nenhuma origem copiada.', wrap=True)
+        parent.append(self.quick_batch_source)
+        self.quick_batch_copy_btn = _button(
+            parent, 'Copiar aparência salva da tecla atual', self._quick_batch_copy)
+        parent.append(_label('Destinos (marque uma ou várias teclas):'))
+        grid = Gtk.Grid(column_spacing=6, row_spacing=4)
+        parent.append(grid)
+        self.quick_batch_targets = {}
+        for ident in range(1, 16):
+            check = Gtk.CheckButton(label=f'{ident:02d}')
+            check.connect('toggled', self._quick_batch_target_toggled)
+            grid.attach(check, (ident - 1) % 5, (ident - 1) // 5, 1, 1)
+            self.quick_batch_targets[ident] = check
+        self.quick_batch_confirm = Gtk.CheckButton(
+            label='Confirmo a substituição da aparência dos destinos marcados')
+        self.quick_batch_confirm.connect('toggled', self._quick_batch_controls)
+        parent.append(self.quick_batch_confirm)
+        self.quick_batch_apply_btn = _button(
+            parent, 'Aplicar em lote e salvar YAML com backup', self._quick_batch_apply,
+            sensitive=False)
+        self.quick_batch_status = _label('Nenhum YAML é alterado ao copiar ou marcar.', wrap=True)
+        parent.append(self.quick_batch_status)
+        parent.append(_label('Depois de salvar, clique em Aplicar ao dispositivo (IPC) '
+                             'se desejar atualizar os LCDs físicos.', style='caption', wrap=True))
+        self._quick_batch_controls()
+
+    def _quick_batch_target_toggled(self, *_):
+        # Destinos diferentes exigem nova confirmação antes de gravar.
+        self.quick_batch_confirm.set_active(False)
+        self._quick_batch_controls()
+
+    def _quick_batch_controls(self, *_):
+        if not hasattr(self, 'quick_batch_apply_btn'):
+            return
+        loaded = self._quick_loaded
+        busy = any(cmd in self._busy for cmd in (
+            'quick_batch_appearance', 'quick_save', 'quick_preview', 'quick_inspect'))
+        valid_source = bool(loaded and not self._quick_dirty and not busy
+                            and self._selected_key in self._quick_batch_configured)
+        self.quick_batch_copy_btn.set_sensitive(valid_source)
+        clip = self._quick_batch_clipboard
+        valid_clip = bool(clip and loaded and clip['profile'] == self._current
+                          and clip['sha256'] == loaded['sha256'])
+        selected = []
+        for ident, check in self.quick_batch_targets.items():
+            available = (valid_clip and not self._quick_dirty and not busy
+                         and ident in self._quick_batch_configured
+                         and ident != clip['source_key'])
+            check.set_sensitive(bool(available))
+            if not available and check.get_active():
+                check.set_active(False)
+            if available and check.get_active():
+                selected.append(ident)
+        self.quick_batch_confirm.set_sensitive(bool(valid_clip and not busy and selected
+                                                       and not self._quick_dirty))
+        self.quick_batch_apply_btn.set_sensitive(bool(valid_clip and selected and not busy
+                             and not self._quick_dirty and self.quick_batch_confirm.get_active()))
+
+    def _quick_batch_copy(self, *_):
+        if (not self._quick_loaded or self._quick_dirty
+                or self._selected_key not in self._quick_batch_configured
+                or any(x in self._busy for x in ('quick_save', 'quick_batch_appearance'))):
+            self.quick_batch_status.set_text('Salve ou descarte alterações antes de copiar.')
+            return
+        self._quick_batch_clipboard = {
+            'profile': self._current, 'source_key': self._selected_key,
+            'sha256': self._quick_loaded['sha256'],
+        }
+        for check in self.quick_batch_targets.values():
+            check.set_active(False)
+        self.quick_batch_confirm.set_active(False)
+        self.quick_batch_source.set_text(
+            f"Origem: tecla {self._selected_key:02d} · perfil {self._current} · versão salva")
+        self.quick_batch_status.set_text('Selecione os destinos e confirme a gravação.')
+        self._quick_batch_controls()
+
+    def _quick_batch_apply(self, *_):
+        clip = self._quick_batch_clipboard
+        loaded = self._quick_loaded
+        if (not clip or not loaded or self._quick_dirty or
+                clip['profile'] != self._current or clip['sha256'] != loaded['sha256'] or
+                not self.quick_batch_confirm.get_active() or 'quick_batch_appearance' in self._busy):
+            self.quick_batch_status.set_text('Cópia inválida ou edição pendente; copie novamente.')
+            return
+        targets = [ident for ident, check in self.quick_batch_targets.items()
+                   if check.get_active() and check.get_sensitive()
+                   and ident in self._quick_batch_configured and ident != clip['source_key']]
+        if not targets:
+            self.quick_batch_status.set_text('Selecione pelo menos uma tecla configurada.')
+            return
+        self._call('quick_batch_appearance', profile=clip['profile'],
+                   source_key=clip['source_key'], targets=targets, sha256=clip['sha256'])
+        self.quick_batch_status.set_text('Salvando aparências em lote com backup…')
+        if hasattr(self, '_quick_controls'):
+            self._quick_controls()
+        if hasattr(self, '_update_style_sensitivity'):
+            self._update_style_sensitivity()
+        self._quick_batch_controls()
 
     def _build_composition_canvas(self, parent):
         group = Gtk.Expander(label='Composição — arrastar texto ou imagem')
@@ -1452,10 +1565,12 @@ class StudioWindow(Adw.ApplicationWindow):
 
     def _update_style_sensitivity(self):
         active = (self._quick_loaded is not None and self.style_enabled.get_active()
-                  and 'quick_save' not in self._busy)
+                  and 'quick_save' not in self._busy
+                  and 'quick_batch_appearance' not in self._busy)
         self.style_options.set_sensitive(active)
         self.style_image_options.set_sensitive(active)
-        self.style_enabled.set_sensitive(self._quick_loaded is not None and 'quick_save' not in self._busy)
+        self.style_enabled.set_sensitive(self._quick_loaded is not None and 'quick_save' not in self._busy
+                                         and 'quick_batch_appearance' not in self._busy)
 
     def _visual_style_changed(self, *_):
         self._update_style_sensitivity()
@@ -1482,8 +1597,9 @@ class StudioWindow(Adw.ApplicationWindow):
     def _quick_controls(self):
         loaded = self._quick_loaded is not None
         for widget in (self.quick_label, self.quick_visual_text, self.quick_image, self.quick_kind, *self.quick_fields):
-            widget.set_sensitive(loaded and 'quick_save' not in self._busy)
-        busy = 'quick_save' in self._busy or 'quick_preview' in self._busy
+            widget.set_sensitive(loaded and 'quick_save' not in self._busy
+                                 and 'quick_batch_appearance' not in self._busy)
+        busy = 'quick_save' in self._busy or 'quick_preview' in self._busy or 'quick_batch_appearance' in self._busy
         self.quick_preview_btn.set_sensitive(loaded and not busy)
         self.quick_save_btn.set_sensitive(loaded and not busy)
         self.quick_apply_btn.set_sensitive(loaded and self._quick_saved and not self._quick_dirty and not busy)
@@ -1491,6 +1607,8 @@ class StudioWindow(Adw.ApplicationWindow):
         self._composition_update_buttons()
         self.quick_icon_flow.set_sensitive(loaded and 'quick_save' not in self._busy)
         self.quick_import_icon_btn.set_sensitive('import_icon' not in self._busy and 'quick_save' not in self._busy)
+        if hasattr(self, 'quick_batch_apply_btn'):
+            self._quick_batch_controls()
 
     def _quick_kind_changed(self, *_):
         kind = KINDS[self.quick_kind.get_selected()]
@@ -1686,6 +1804,7 @@ class StudioWindow(Adw.ApplicationWindow):
                 self._quick_load()
                 return
             self._quick_loaded = response
+            self._quick_batch_configured = set(response.get('configured_keys', []))
             self._quick_updating = True
             try:
                 data = key_to_form(response['edited'])
@@ -1700,13 +1819,18 @@ class StudioWindow(Adw.ApplicationWindow):
             finally:
                 self._quick_updating = False
             self._quick_dirty = False
-            self._quick_saved = False
+            self._quick_saved = self._quick_batch_pending_apply
+            self._quick_batch_pending_apply = False
             self._composition_history.clear()
             self._composition_update_buttons()
-            self.quick_state.set_text('Pronta para editar. Alterações só são salvas ao clicar em Salvar YAML.')
+            self.quick_state.set_text(
+                'Aparências em lote salvas com backup. Clique em Aplicar ao dispositivo (IPC) '
+                'para atualizar os LCDs.' if self._quick_saved else
+                'Pronta para editar. Alterações só são salvas ao clicar em Salvar YAML.')
             # Prévia local automática ao selecionar a tecla, não exige
             # clicar em um botão oculto na parte inferior do painel.
             self._quick_preview()
+            self._quick_batch_controls()
         elif command == 'quick_preview':
             if not self._quick_loaded:
                 return
@@ -1752,6 +1876,18 @@ class StudioWindow(Adw.ApplicationWindow):
             self._quick_dirty = False
             self._quick_saved = True
             self.quick_state.set_text('YAML salvo com backup em ' + response['backup'] + '. Clique em Aplicar ao dispositivo.')
+        elif command == 'quick_batch_appearance':
+            self.quick_batch_status.set_text(
+                f"{len(response['targets'])} tecla(s) atualizada(s). Backup: {response['backup']}")
+            self._quick_batch_clipboard = None
+            self.quick_batch_confirm.set_active(False)
+            self.quick_batch_source.set_text('Copie uma origem para nova operação.')
+            self._quick_saved = False  # aguardar inspeção da nova revisão
+            self._quick_batch_pending_apply = True
+            self._quick_dirty = False
+            self._quick_loaded = None
+            self._quick_load()
+            self._call('previews')
         self._quick_controls()
 
     def _build_profiles(self):
@@ -1903,7 +2039,7 @@ class StudioWindow(Adw.ApplicationWindow):
             else:
                 self.top_status.set_text(f'{command}: {message}')
             return False
-        if command in {'quick_inspect', 'quick_preview', 'quick_save'}:
+        if command in {'quick_inspect', 'quick_preview', 'quick_save', 'quick_batch_appearance'}:
             self._quick_received(command, response)
             return False
         if command in {'status', 'switch', 'reload'}:
@@ -2015,6 +2151,9 @@ class StudioWindow(Adw.ApplicationWindow):
     def _profile_selected(self, widget, _param):
         if self._syncing or not self._connected:
             return
+        if 'quick_batch_appearance' in self._busy:
+            self._update_combo()
+            return
         if self._quick_dirty:
             self.quick_state.set_text('Salve ou descarte a edição antes de trocar o perfil.')
             self._update_combo()
@@ -2046,6 +2185,9 @@ class StudioWindow(Adw.ApplicationWindow):
         Não recriar filhos do botão durante o primeiro clique: isso pode
         interromper a sequência do gesto duplo em algumas versões de GTK.
         """
+        if 'quick_batch_appearance' in self._busy:
+            self.quick_state.set_text('Aguarde a gravação em lote.')
+            return
         if key_id != self._selected_key and self._quick_dirty:
             self.quick_state.set_text('Salve ou descarte as alterações antes de selecionar outra tecla.')
             return

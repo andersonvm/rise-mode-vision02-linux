@@ -26,6 +26,7 @@ from vision02.icon_library import list_icons, import_icon
 from vision02.user_profiles import default_profile_paths
 from vision02.rendering import render_profile, render_key
 from vision02.studio_preview_layers_v7 import render_preview_views, render_rgba_components
+from vision02.studio_batch_appearance_v9 import copy_saved_appearance
 from vision02.protocol import physical_key_to_display_id
 
 DEFAULT_PROFILES = (
@@ -199,6 +200,45 @@ def _preview_root() -> Path:
     path = home / "vision02" / "editor"
     path.mkdir(parents=True, exist_ok=True, mode=0o700)
     return path
+
+
+
+def save_batch_appearance(project: Path, name: str, source_key: int, targets: list[int],
+                          expected: str, paths=None, backup_dir: Path | None = None) -> dict:
+    """Uma gravação YAML, um backup, nenhuma aplicação IPC.
+
+    Verifica revisão SHA antes e imediatamente antes do os.replace; valida o
+    YAML no mesmo diretório para preservar caminhos relativos de imagens.
+    """
+    path = _resolve_profile(project, name, paths)
+    if path.is_symlink() or not path.is_file():
+        raise ValueError('Arquivo do perfil não pode ser link simbólico')
+    original = path.read_bytes()
+    if expected != _sha(original):
+        raise RuntimeError('O perfil mudou no disco. Recarregue antes de aplicar em lote.')
+    payload = copy_saved_appearance(original, source_key, targets)
+    temp, _ = _validate_at_same_location(path, payload)
+    try:
+        if path.is_symlink() or path.read_bytes() != original:
+            raise RuntimeError('O perfil mudou durante a gravação. Nenhum dado foi substituído.')
+        storage = backup_dir or (Path(os.environ.get('XDG_STATE_HOME', Path.home() / '.local/state'))
+                                 / 'vision02' / 'editor-backups')
+        storage.mkdir(parents=True, exist_ok=True, mode=0o700)
+        stamp = datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S%fZ')
+        backup = storage / f'{path.stem}-batch-v9-{stamp}-{_sha(original)[:12]}.yaml'
+        with backup.open('xb') as dest:
+            dest.write(original)
+            dest.flush()
+            os.fsync(dest.fileno())
+        os.chmod(temp, path.stat().st_mode & 0o777)
+        os.replace(temp, path)
+        temp = None
+        return {'ok': True, 'path': str(path), 'backup': str(backup),
+                'sha256': _sha(payload), 'source_key': source_key,
+                'targets': sorted(targets)}
+    finally:
+        if temp is not None:
+            temp.unlink(missing_ok=True)
 
 
 def preview_key(project: Path, name: str, key_id: int, edited: dict,
