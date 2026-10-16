@@ -19,13 +19,14 @@ BACKEND = ROOT / 'apps/vision02_studio_backend.py'
 import gi
 gi.require_version('Gtk', '4.0')
 gi.require_version('Adw', '1')
-from gi.repository import Adw, Gdk, Gio, GLib, Gtk, Pango
+from gi.repository import Adw, Gdk, GdkPixbuf, Gio, GLib, Gtk, Pango
 
 from vision02.editor_navigation import editor_args
 from vision02.studio_interaction import DoubleClickDetector
 from vision02.studio_inline_edit import KINDS, HINTS, key_to_form
 from vision02.studio_icon_gallery import filtered_icons, icon_by_path
-from vision02.studio_visual_style import CHOICES, INT_RANGES, COLORS, ui_appearance, validated_appearance, hex_from_rgb
+from vision02.studio_visual_style import CHOICES, INT_RANGES, IMAGE_RANGES, COLORS, ui_appearance, validated_appearance, hex_from_rgb
+from vision02.studio_composition import clamp_drag, grid_coordinate
 from vision02_studio_layout import (
     MIN_SIDEBAR_WIDTH, load_sidebar_width, save_sidebar_width,
 )
@@ -94,6 +95,8 @@ class StudioWindow(Adw.ApplicationWindow):
         self._quick_preview_queued = False
         self._style_preview_timer = 0
         self._style_color_syncing = False
+        self._composition_pixbuf = None
+        self._composition_drag_start = (0, 0)
         self._syncing = False
         self._sidebar_save_timer = 0
 
@@ -210,6 +213,11 @@ class StudioWindow(Adw.ApplicationWindow):
             button.vision02-icon-selected {
                 border: 3px solid #3584e4;
                 background-color: rgba(53, 132, 228, 0.10);
+            }
+            frame.vision02-composition-surface {
+                background-color: #101723;
+                border: 2px solid #3584e4;
+                border-radius: 8px;
             }
         """)
         Gtk.StyleContext.add_provider_for_display(
@@ -343,6 +351,8 @@ class StudioWindow(Adw.ApplicationWindow):
         self.quick_picture.set_size_request(100, 100)
         self.quick_picture.set_content_fit(Gtk.ContentFit.CONTAIN)
         box.append(self.quick_picture)
+        self._build_composition_canvas(box)
+
         btns = _box(False, 6)
         box.append(btns)
         self.quick_preview_btn = _button(btns, 'Pré-visualizar (local)', self._quick_preview)
@@ -355,6 +365,102 @@ class StudioWindow(Adw.ApplicationWindow):
                           style='caption', wrap=True))
         self._quick_kind_changed()
         self._quick_controls()
+
+    def _build_composition_canvas(self, parent):
+        group = Gtk.Expander(label='Composição — arrastar texto ou imagem')
+        group.set_expanded(True)
+        parent.append(group)
+        column = _box(False, 6)
+        column.set_margin_top(8)
+        group.set_child(column)
+        column.append(_label('A prévia ampliada é carregada automaticamente ao selecionar a tecla. '
+                             'Arraste dentro da borda azul para editar a posição.',
+                             wrap=True, style='caption'))
+        self.composition_target = Gtk.DropDown.new_from_strings(['Imagem', 'Texto'])
+        column.append(self.composition_target)
+        self.composition_grid = Gtk.CheckButton(label='Encaixar na grade de 5 pixels')
+        column.append(self.composition_grid)
+
+        # O Gtk.Picture é responsável por mostrar o PNG; o DrawingArea só
+        # desenha guias transparentes. Isso evita uma tela vazia quando o
+        # suporte cairo/GdkPixbuf não está disponível no runtime GTK.
+        frame = Gtk.Frame()
+        frame.add_css_class('vision02-composition-surface')
+        frame.set_halign(Gtk.Align.CENTER)
+        frame.set_size_request(256, 256)
+        column.append(frame)
+        self.composition_surface = Gtk.Overlay()
+        self.composition_surface.set_size_request(248, 248)
+        frame.set_child(self.composition_surface)
+        self.composition_picture = Gtk.Picture()
+        self.composition_picture.set_content_fit(Gtk.ContentFit.CONTAIN)
+        self.composition_picture.set_size_request(240, 240)
+        self.composition_surface.set_child(self.composition_picture)
+        self.composition_canvas = Gtk.DrawingArea()
+        self.composition_canvas.set_content_width(240)
+        self.composition_canvas.set_content_height(240)
+        self.composition_canvas.set_can_target(False)
+        self.composition_canvas.set_draw_func(self._composition_draw)
+        self.composition_surface.add_overlay(self.composition_canvas)
+        gesture = Gtk.GestureDrag.new()
+        gesture.connect('drag-begin', self._composition_drag_begin)
+        gesture.connect('drag-update', self._composition_drag_update)
+        self.composition_surface.add_controller(gesture)
+        self.composition_status = _label('Aguardando prévia local da tecla selecionada.',
+                                         style='caption', wrap=True)
+        column.append(self.composition_status)
+        column.append(_label('Imagem: posição e escala nos controles Aparência visual. '
+                             'Texto: desloque diretamente, com os limites atuais de ±40 px. '
+                             'Arrastar ativa a aparência personalizada.', wrap=True,
+                             style='caption'))
+
+    def _composition_draw(self, _area, cr, width, height):
+        # Camada TRANSPARENTE: Gtk.Picture apresenta a imagem abaixo das guias.
+        extent = min(width, height)
+        origin_x, origin_y = (width - extent) / 2, (height - extent) / 2
+        cr.set_source_rgba(1.0, 1.0, 1.0, 0.32)
+        cr.set_line_width(1)
+        for point in (25, 50, 75):
+            coordinate = point * extent / 100
+            cr.move_to(origin_x + coordinate, origin_y)
+            cr.line_to(origin_x + coordinate, origin_y + extent)
+            cr.move_to(origin_x, origin_y + coordinate)
+            cr.line_to(origin_x + extent, origin_y + coordinate)
+        cr.stroke()
+
+    def _composition_drag_begin(self, *_):
+        if self._quick_loaded is None or 'quick_save' in self._busy:
+            self.composition_status.set_text('Selecione uma tecla e aguarde suas propriedades.')
+            return
+        if not self.style_enabled.get_active():
+            # Não descartar um gesto porque a seção Aparência está recolhida.
+            # A alteração é apenas local até Salvar YAML / Aplicar IPC.
+            self.style_enabled.set_active(True)
+        target = ('image_x', 'image_y') if self.composition_target.get_selected() == 0 else ('offset_x', 'offset_y')
+        self._composition_drag_start = tuple(int(self.style_numbers[field].get_value()) for field in target)
+        self.composition_status.set_text('Arrastando ' + ('imagem' if target[0] == 'image_x' else 'texto') + '…')
+
+    def _composition_drag_update(self, _gesture, offset_x, offset_y):
+        if self._quick_loaded is None or 'quick_save' in self._busy or not self.style_enabled.get_active():
+            return
+        target = ('image_x', 'image_y') if self.composition_target.get_selected() == 0 else ('offset_x', 'offset_y')
+        extent = min(self.composition_canvas.get_width(), self.composition_canvas.get_height())
+        if extent <= 0:
+            self.composition_status.set_text('Área de composição indisponível; amplie a janela.')
+            return
+        snap = bool(self.composition_grid.get_active())
+        result = []
+        for index, (field, diff) in enumerate(zip(target, (offset_x, offset_y))):
+            lower, upper = ({**INT_RANGES, **IMAGE_RANGES})[field]
+            value = clamp_drag(self._composition_drag_start[index], diff, extent / 100, lower, upper)
+            if snap:
+                value = grid_coordinate(value, lower, upper)
+            self.style_numbers[field].set_value(value)
+            result.append(value)
+        self.composition_status.set_text(
+            ('Imagem' if target[0] == 'image_x' else 'Texto') +
+            f': X={result[0]} px, Y={result[1]} px — prévia sendo atualizada.'
+        )
 
     def _style_color_field(self, parent, title, name):
         row = _box(True, 6)
@@ -410,8 +516,11 @@ class StudioWindow(Adw.ApplicationWindow):
         self.style_numbers = {}
         names = {'font_size': 'Tamanho da fonte (8–36)',
                  'offset_x': 'Deslocamento X do texto (px)',
-                 'offset_y': 'Deslocamento Y do texto (px)'}
-        for name, (minimum, maximum) in INT_RANGES.items():
+                 'offset_y': 'Deslocamento Y do texto (px)',
+                 'image_x': 'Imagem: posição X (px)',
+                 'image_y': 'Imagem: posição Y (px)',
+                 'image_scale': 'Imagem: tamanho (%)'}
+        for name, (minimum, maximum) in {**INT_RANGES, **IMAGE_RANGES}.items():
             self.style_options.append(_label(names[name]))
             spin = Gtk.SpinButton.new_with_range(minimum, maximum, 1)
             spin.set_numeric(True)
@@ -422,9 +531,8 @@ class StudioWindow(Adw.ApplicationWindow):
         self.style_show_text.connect('toggled', self._visual_style_changed)
         self.style_options.append(self.style_show_text)
         self.style_enabled.connect('toggled', self._visual_style_changed)
-        controls.append(_label('Ajuste da imagem não reposiciona o ícone: o renderizador '
-                               'atual oferece preencher, conter ou esticar. '
-                               'Deslocamentos X/Y atuam somente no texto.',
+        controls.append(_label('Imagem: escala de 25% a 200%, posição X/Y de −100 a +100 px. '
+                               'Texto: deslocamento X/Y de −40 a +40 px.',
                                wrap=True, style='caption'))
         controls.append(_label('A prévia é gerada automaticamente após a edição; '
                                'Salvar YAML e Aplicar IPC continuam separados.',
@@ -554,6 +662,15 @@ class StudioWindow(Adw.ApplicationWindow):
             return
         self._quick_loaded = None
         self._quick_saved = False
+        self._composition_pixbuf = None
+        self.composition_picture.set_paintable(None)
+        self.composition_canvas.queue_draw()
+        self.composition_status.set_text('Aguardando prévia da tecla selecionada…')
+        if self._live_active == self._current:
+            live = self._live_images.get(str(self._selected_key)) or self._live_images.get(self._selected_key)
+            if live and Path(live).is_file():
+                self.composition_picture.set_file(Gio.File.new_for_path(live))
+                self.composition_status.set_text('Espelho do LCD; gerando prévia editável…')
         self.quick_target.set_text(f'{self._current} · tecla física {self._selected_key:02d}')
         self.quick_state.set_text('Carregando propriedades…')
         self._quick_controls()
@@ -694,6 +811,9 @@ class StudioWindow(Adw.ApplicationWindow):
             self._quick_dirty = False
             self._quick_saved = False
             self.quick_state.set_text('Pronta para editar. Alterações só são salvas ao clicar em Salvar YAML.')
+            # Prévia local automática ao selecionar a tecla, não exige
+            # clicar em um botão oculto na parte inferior do painel.
+            self._quick_preview()
         elif command == 'quick_preview':
             if not self._quick_loaded:
                 return
@@ -706,8 +826,21 @@ class StudioWindow(Adw.ApplicationWindow):
             request_matches = self._quick_preview_snapshot == latest
             response_matches = (response['profile'], response['key_id']) == latest[:2]
             if request_matches and response_matches and not self._quick_preview_queued:
-                self.quick_picture.set_file(Gio.File.new_for_path(response['image']))
-                self.quick_state.set_text('Pré-visualização local pronta; não alterou o dispositivo.')
+                try:
+                    # Validar que o arquivo foi produzido e decodificado,
+                    # antes de mostrá-lo em ambas as prévias GTK.
+                    self._composition_pixbuf = GdkPixbuf.Pixbuf.new_from_file(response['image'])
+                    picture_file = Gio.File.new_for_path(response['image'])
+                    self.quick_picture.set_file(picture_file)
+                    self.composition_picture.set_file(picture_file)
+                    self.composition_canvas.queue_draw()
+                    self.composition_status.set_text('Prévia local pronta: arraste dentro da borda azul.')
+                    self.quick_state.set_text('Pré-visualização local pronta; não alterou o dispositivo.')
+                except (GLib.Error, OSError) as exc:
+                    self._composition_pixbuf = None
+                    self.composition_picture.set_paintable(None)
+                    self.composition_status.set_text('Falha ao carregar imagem ampliada: ' + str(exc))
+                    self.quick_state.set_text('Falha na pré-visualização local: ' + str(exc))
             else:
                 # Não deixar uma imagem antiga sobrescrever a última escolha.
                 self._quick_preview_queued = False

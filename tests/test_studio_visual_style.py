@@ -13,7 +13,7 @@ import yaml
 from vision02.profiles.loader import parse_appearance
 from vision02.profiles.models import KeyAppearance
 from vision02.studio_inline_edit import form_to_key
-from vision02.studio_visual_style import CHOICES, INT_RANGES, COLORS, ui_appearance, validated_appearance, hex_from_rgb
+from vision02.studio_visual_style import CHOICES, INT_RANGES, IMAGE_RANGES, COLORS, ui_appearance, validated_appearance, hex_from_rgb
 
 ROOT = Path(__file__).resolve().parents[1]
 spec = importlib.util.spec_from_file_location('style_studio_backend', ROOT / 'apps/vision02_studio_backend.py')
@@ -131,8 +131,9 @@ def test_hex_reject_out_of_range():
 def test_choices_match_loader_and_known_controls():
     assert set(CHOICES) == {'font_family','font_weight','horizontal','vertical','image_fit'}
     assert set(INT_RANGES) == {'font_size','offset_x','offset_y'}
+    assert set(IMAGE_RANGES) == {'image_x','image_y','image_scale'}
     assert set(COLORS) == {'background','text_color'}
-    assert {k for k in controls()} == set(CHOICES) | set(INT_RANGES) | set(COLORS) | {'show_text'}
+    assert {k for k in controls()} == set(CHOICES) | set(INT_RANGES) | set(IMAGE_RANGES) | set(COLORS) | {'show_text'}
 
 
 def test_backend_preview_reflects_custom_background(tmp_path, monkeypatch):

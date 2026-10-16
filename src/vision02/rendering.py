@@ -200,8 +200,20 @@ def _appearance_background(image_path: Path | None, style: KeyAppearance) -> Ima
             overlay = centered
         else:
             overlay = source.resize(LCD_SIZE, Image.Resampling.LANCZOS)
+    # In legacy configurations (x=y=0 and scale=100), retain the exact
+    # original raster pipeline: no additional resampling or quantization.
+    if (style.image_x, style.image_y, style.image_scale) != (0, 0, 100):
+        if style.image_scale != 100:
+            side = max(1, round(100 * style.image_scale / 100))
+            overlay = overlay.resize((side, side), Image.Resampling.LANCZOS)
+        # alpha_composite(destination) crops images at the LCD boundary;
+        # source proportions and transparency are preserved by Pillow.
+        xy = ((100 - overlay.width) // 2 + style.image_x,
+              (100 - overlay.height) // 2 + style.image_y)
+    else:
+        xy = (0, 0)
     composed = background.convert("RGBA")
-    composed.alpha_composite(overlay)
+    composed.alpha_composite(overlay, xy)
     return composed.convert("RGB")
 
 

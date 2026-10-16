@@ -223,7 +223,8 @@ _APPEARANCE_DEFAULTS = {
     "background": "#080C16", "text": None, "font_family": "sans",
     "font_size": 18, "font_weight": "bold", "text_color": "#F5F7FA",
     "horizontal": "center", "vertical": "center", "offset_x": 0, "offset_y": 0,
-    "image_fit": "cover", "show_text": True,
+    "image_fit": "cover", "image_x": 0, "image_y": 0, "image_scale": 100,
+    "show_text": True,
 }
 _APPEARANCE_ENUMS = {
     "font_family": {"sans", "serif", "mono"},
@@ -255,6 +256,11 @@ def parse_appearance(value: dict | None) -> KeyAppearance | None:
     for field in ("offset_x", "offset_y"):
         if type(result[field]) is not int or not -40 <= result[field] <= 40:
             raise ProfileValidationError(f"appearance.{field} deve estar entre -40 e 40")
+    for field in ("image_x", "image_y"):
+        if type(result[field]) is not int or not -100 <= result[field] <= 100:
+            raise ProfileValidationError(f"appearance.{field} deve estar entre -100 e 100")
+    if type(result["image_scale"]) is not int or not 25 <= result["image_scale"] <= 200:
+        raise ProfileValidationError("appearance.image_scale deve estar entre 25 e 200")
     if type(result["show_text"]) is not bool:
         raise ProfileValidationError("appearance.show_text deve ser booleano")
     return KeyAppearance(**result)

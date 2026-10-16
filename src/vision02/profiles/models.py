@@ -35,6 +35,9 @@ class KeyAppearance:
     offset_x: int = 0
     offset_y: int = 0
     image_fit: str = "cover"
+    image_x: int = 0
+    image_y: int = 0
+    image_scale: int = 100
     show_text: bool = True
 
 

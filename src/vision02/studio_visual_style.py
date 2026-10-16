@@ -18,6 +18,7 @@ CHOICES = {
     'image_fit': ('cover', 'contain', 'stretch'),
 }
 INT_RANGES = {'font_size': (8, 36), 'offset_x': (-40, 40), 'offset_y': (-40, 40)}
+IMAGE_RANGES = {'image_x': (-100, 100), 'image_y': (-100, 100), 'image_scale': (25, 200)}
 COLORS = ('background', 'text_color')
 
 
