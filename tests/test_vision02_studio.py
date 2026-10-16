@@ -116,3 +116,23 @@ def test_backend_main_returns_json_on_failure(monkeypatch, capsys):
     result = BACKEND.main()
     assert result == 1
     assert json.loads(capsys.readouterr().out)['ok'] is False
+
+
+def test_live_preview_only_reads_owner_ipc(monkeypatch):
+    ipc = Mock(return_value={'ok': True, 'active': 'Sistema', 'revision': 12, 'images': {}})
+    monkeypatch.setattr(BACKEND, 'ipc_request', ipc)
+    result = BACKEND.run('live_preview')
+    assert result['revision'] == 12
+    ipc.assert_called_once_with('display_preview', timeout=7)
+
+
+def test_live_preview_rejects_arguments():
+    with pytest.raises(ValueError):
+        BACKEND.run('live_preview', {'target': 'OBS'})
+
+
+def test_live_preview_source_never_opens_hid():
+    gtk = (ROOT / 'apps/vision02_studio.py').read_text(encoding='utf-8')
+    assert "self._call('live_preview')" in gtk
+    assert 'Gdk.Texture.new_from_bytes' in gtk
+    assert 'Vision02(' not in gtk

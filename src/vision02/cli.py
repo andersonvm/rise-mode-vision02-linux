@@ -13,6 +13,7 @@ from .control_ipc import ControlServer, request as ipc_request
 from .profile_reload import FatalReloadError, reload_profiles
 from .actions.executor import close_wayland_keyboard
 from .device import Vision02, find_device
+from .display_preview import DisplayPreview, MirroredDevice
 from .profiles import (
     ProfileManager,
     ProfileManagerError,
@@ -83,6 +84,7 @@ def build_parser() -> argparse.ArgumentParser:
     control_sub.add_parser("status", help="Estado e perfil ativo")
     control_sub.add_parser("profiles", help="Perfis disponíveis")
     control_sub.add_parser("reload", help="Recarrega os YAML sem reiniciar HID")
+    control_sub.add_parser("display_preview", help="Consulta as imagens exibidas nos LCDs")
     control_switch = control_sub.add_parser("switch", help="Ativa um perfil existente")
     control_switch.add_argument("target", help="Nome exato do perfil")
 
@@ -121,7 +123,15 @@ def _run_profile(
     # Teclas cujos eventos devem ser ignorados até a liberação.
     blocked_keys: set[int] = set()
 
-    with Vision02() as device:
+    with Vision02() as original_device:
+        preview = None
+        if ipc:
+            try:
+                preview = DisplayPreview()
+            except (OSError, RuntimeError) as exc:
+                print(f'[Vision02] Prévia dinâmica indisponível: {exc}', flush=True)
+        device = MirroredDevice(original_device, preview) if preview is not None else original_device
+
         def drain_events() -> None:
             """Descarta eventos antigos sem bloquear indefinidamente."""
             limit = 256
@@ -163,6 +173,11 @@ def _run_profile(
                 }
             if command == "profiles":
                 return {"profiles": list(manager.list_profiles())}
+            if command == "display_preview":
+                if preview is None:
+                    return {'active': manager.active_name, 'available': False,
+                            'revision': 0, 'images': {}}
+                return preview.manifest(manager.active_name)
             if command == "reload":
                 if catalog:
                     profile_paths = default_profile_paths(Path.cwd())

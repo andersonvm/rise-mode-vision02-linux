@@ -19,7 +19,7 @@ BACKEND = ROOT / 'apps/vision02_studio_backend.py'
 import gi
 gi.require_version('Gtk', '4.0')
 gi.require_version('Adw', '1')
-from gi.repository import Adw, Gio, GLib, Gtk, Pango
+from gi.repository import Adw, Gdk, Gio, GLib, Gtk, Pango
 
 from vision02_studio_layout import (
     MIN_SIDEBAR_WIDTH, load_sidebar_width, save_sidebar_width,
@@ -68,6 +68,9 @@ class StudioWindow(Adw.ApplicationWindow):
         self._current = ''
         self._connected = False
         self._previews = {}
+        self._live_images = {}
+        self._live_active = ''
+        self._live_revision = -1
         self._selected_key = 1
         self._icons = []
         self._syncing = False
@@ -128,8 +131,10 @@ class StudioWindow(Adw.ApplicationWindow):
 
         self._call('status')
         self._call('previews')
+        self._call('live_preview')
         self._call('icons')
         self._timer = GLib.timeout_add_seconds(4, self._tick)
+        self._preview_timer = GLib.timeout_add_seconds(2, self._preview_tick)
         self.connect('close-request', self._on_close)
 
     def _page(self, key, title, description):
@@ -163,8 +168,8 @@ class StudioWindow(Adw.ApplicationWindow):
 
     def _build_keys(self):
         page = self._page('keys', 'Teclas',
-                          'Prévia das 15 posições físicas. Clique para inspecionar; '
-                          'as ações não são executadas ao clicar na interface.')
+                          'Espelho dos 15 LCDs: imagem enviada pelo serviço, atualizada a cada 2 segundos. '
+                          'Clique para inspecionar; nenhuma ação é executada aqui.')
         row = _box(True)
         page.append(row)
         row.append(_label('Perfil:'))
@@ -318,6 +323,7 @@ class StudioWindow(Adw.ApplicationWindow):
         if command in {'status', 'switch', 'reload'}:
             if command == 'reload':
                 self._call('previews')
+                self._call('live_preview')
             self._call('status') if command in {'switch', 'reload'} else None
             if command != 'status':
                 return False
@@ -338,6 +344,17 @@ class StudioWindow(Adw.ApplicationWindow):
         elif command == 'previews':
             self._previews = response.get('profiles') or {}
             self._render_keys()
+        elif command == 'live_preview':
+            active = response.get('active') or ''
+            revision = response.get('revision', -1)
+            images = response.get('images') if response.get('available') else {}
+            if (active != self._live_active or revision != self._live_revision
+                    or images != self._live_images):
+                self._live_active = active
+                self._live_revision = revision
+                self._live_images = images or {}
+                if self.stack.get_visible_child_name() == 'keys':
+                    self._render_keys()
         elif command == 'icons':
             self._icons = response.get('icons') or []
             self._render_icons()
@@ -418,7 +435,21 @@ class StudioWindow(Adw.ApplicationWindow):
             cell = _box(False, 3)
             cell.set_halign(Gtk.Align.CENTER)
             png = item.get('image')
-            if isinstance(png, str) and Path(png).is_file():
+            live_path = self._live_images.get(str(key_id)) if self._live_active == self._current else None
+            live_picture = None
+            if isinstance(live_path, str):
+                try:
+                    data = Path(live_path).read_bytes()
+                    if 0 < len(data) <= 256 * 1024:
+                        texture = Gdk.Texture.new_from_bytes(GLib.Bytes.new(data))
+                        live_picture = Gtk.Picture.new_for_paintable(texture)
+                except (OSError, GLib.Error, ValueError):
+                    pass
+            if live_picture is not None:
+                live_picture.set_size_request(92, 92)
+                live_picture.set_content_fit(Gtk.ContentFit.CONTAIN)
+                cell.append(live_picture)
+            elif isinstance(png, str) and Path(png).is_file():
                 picture = Gtk.Picture.new_for_file(Gio.File.new_for_path(png))
                 picture.set_size_request(92, 92)
                 picture.set_content_fit(Gtk.ContentFit.CONTAIN)
@@ -436,7 +467,8 @@ class StudioWindow(Adw.ApplicationWindow):
             f"Tecla física {self._selected_key:02d}  |  "
             f"LCD {key.get('display_id', '—')}  |  "
             f"{key.get('label') or 'Sem rótulo'}  |  "
-            f"Ação: {key.get('action') or 'Nenhuma'}"
+            f"Ação: {key.get('action') or 'Nenhuma'}  |  "
+            f"Imagem: {'LCD ao vivo' if self._live_active == self._current and self._live_images else 'Prévia YAML'}"
         )
 
     def _render_icons(self):
@@ -482,6 +514,7 @@ class StudioWindow(Adw.ApplicationWindow):
             self._call('status')
         if key == 'keys':
             self._call('previews')
+            self._call('live_preview')
         elif key == 'icons':
             self._call('icons')
         elif key == 'system':
@@ -491,6 +524,13 @@ class StudioWindow(Adw.ApplicationWindow):
 
     def _on_page(self, *_):
         self._refresh_current()
+
+    def _preview_tick(self):
+        if self._closed:
+            return False
+        if self.stack.get_visible_child_name() == 'keys':
+            self._call('live_preview')
+        return True
 
     def _tick(self):
         if self._closed:
@@ -525,6 +565,9 @@ class StudioWindow(Adw.ApplicationWindow):
             GLib.source_remove(self._sidebar_save_timer)
             self._persist_sidebar_width()
         self._closed = True
+        if self._preview_timer:
+            GLib.source_remove(self._preview_timer)
+            self._preview_timer = 0
         if self._timer:
             GLib.source_remove(self._timer)
             self._timer = 0
