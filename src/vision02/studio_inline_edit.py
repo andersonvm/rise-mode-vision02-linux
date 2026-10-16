@@ -96,9 +96,13 @@ def form_to_key(form: dict) -> dict:
     if appearance is not None and not isinstance(appearance, dict):
         raise ValueError('Aparência inválida')
     if visual_text:
+        # Preserve explicit checkbox choice in the visual editor. If there was
+        # no custom appearance, entering text enables it as before.
+        was_custom = appearance is not None
         appearance = dict(appearance or {})
         appearance['text'] = visual_text
-        appearance['show_text'] = True
+        if not was_custom:
+            appearance['show_text'] = True
     elif appearance is not None and appearance.get('text') is not None:
         appearance = dict(appearance)
         appearance['text'] = None  # sem texto personalizado: usa o rótulo

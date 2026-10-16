@@ -25,6 +25,7 @@ from vision02.editor_navigation import editor_args
 from vision02.studio_interaction import DoubleClickDetector
 from vision02.studio_inline_edit import KINDS, HINTS, key_to_form
 from vision02.studio_icon_gallery import filtered_icons, icon_by_path
+from vision02.studio_visual_style import CHOICES, INT_RANGES, COLORS, ui_appearance, validated_appearance, hex_from_rgb
 from vision02_studio_layout import (
     MIN_SIDEBAR_WIDTH, load_sidebar_width, save_sidebar_width,
 )
@@ -91,6 +92,8 @@ class StudioWindow(Adw.ApplicationWindow):
         self._quick_import_target = None
         self._quick_preview_snapshot = None
         self._quick_preview_queued = False
+        self._style_preview_timer = 0
+        self._style_color_syncing = False
         self._syncing = False
         self._sidebar_save_timer = 0
 
@@ -317,6 +320,7 @@ class StudioWindow(Adw.ApplicationWindow):
         gallery_box.append(_label('Um clique escolhe o ícone e gera uma prévia local. '
                                   'Para alterar o LCD: Salvar YAML → Aplicar IPC.',
                                   style='caption', wrap=True))
+        self._build_visual_style(box)
         box.append(_label('Ação'))
         self.quick_kind = Gtk.DropDown.new_from_strings(
             ['Sem ação (limpar)', 'Comando', 'URL', 'Script', 'Atalho', 'Trocar perfil', 'OBS']
@@ -347,9 +351,158 @@ class StudioWindow(Adw.ApplicationWindow):
         _button(btns, 'Descartar edição / recarregar', self._quick_discard)
         _button(box, 'Editor avançado de aparência…', self._edit_selected_key)
         box.append(_label('Salvar não aplica automaticamente. Nenhum clique aqui executa ações. '
-                          'Aparência avançada é preservada.', style='caption', wrap=True))
+                          'Fontes e deslocamentos são renderizados localmente antes de salvar.',
+                          style='caption', wrap=True))
         self._quick_kind_changed()
         self._quick_controls()
+
+    def _style_color_field(self, parent, title, name):
+        row = _box(True, 6)
+        parent.append(row)
+        row.append(_label(title))
+        entry = Gtk.Entry()
+        entry.set_width_chars(9)
+        entry.set_max_length(7)
+        row.append(entry)
+        self.style_colors[name] = entry
+        # Gtk.ColorDialogButton is preferred on GTK >= 4.10; older Ubuntu
+        # versions use ColorButton, with the same explicit RGB text field.
+        if hasattr(Gtk, 'ColorDialogButton') and hasattr(Gtk, 'ColorDialog'):
+            picker = Gtk.ColorDialogButton.new(Gtk.ColorDialog.new())
+            picker.connect('notify::rgba', self._color_picker_changed, name)
+        else:
+            picker = Gtk.ColorButton()
+            picker.connect('color-set', self._color_picker_changed, name)
+        row.append(picker)
+        self.style_pickers[name] = picker
+        entry.connect('changed', self._color_entry_changed, name)
+
+    def _build_visual_style(self, parent):
+        expander = Gtk.Expander(label='Aparência visual — fontes, cores e posição')
+        expander.set_expanded(False)
+        parent.append(expander)
+        controls = _box(False, 8)
+        controls.set_margin_top(8)
+        controls.set_margin_bottom(10)
+        expander.set_child(controls)
+        self.style_enabled = Gtk.CheckButton(label='Usar aparência personalizada')
+        controls.append(self.style_enabled)
+        self.style_options = _box(False, 7)
+        controls.append(self.style_options)
+        self.style_colors = {}
+        self.style_pickers = {}
+        for name, title in (('background', 'Fundo'), ('text_color', 'Texto')):
+            self._style_color_field(self.style_options, title, name)
+        self.style_choices = {}
+        labels = {
+            'font_family': ('Família da fonte', ('Sans', 'Serif', 'Mono')),
+            'font_weight': ('Peso', ('Normal', 'Negrito')),
+            'horizontal': ('Texto horizontal', ('Esquerda', 'Centro', 'Direita')),
+            'vertical': ('Texto vertical', ('Topo', 'Centro', 'Base')),
+            'image_fit': ('Imagem', ('Preencher', 'Conter', 'Esticar')),
+        }
+        for name, (title, captions) in labels.items():
+            self.style_options.append(_label(title))
+            widget = Gtk.DropDown.new_from_strings(list(captions))
+            self.style_options.append(widget)
+            widget.connect('notify::selected', self._visual_style_changed)
+            self.style_choices[name] = widget
+        self.style_numbers = {}
+        names = {'font_size': 'Tamanho da fonte (8–36)',
+                 'offset_x': 'Deslocamento X do texto (px)',
+                 'offset_y': 'Deslocamento Y do texto (px)'}
+        for name, (minimum, maximum) in INT_RANGES.items():
+            self.style_options.append(_label(names[name]))
+            spin = Gtk.SpinButton.new_with_range(minimum, maximum, 1)
+            spin.set_numeric(True)
+            spin.connect('value-changed', self._visual_style_changed)
+            self.style_options.append(spin)
+            self.style_numbers[name] = spin
+        self.style_show_text = Gtk.CheckButton(label='Exibir texto sobre imagem/fundo')
+        self.style_show_text.connect('toggled', self._visual_style_changed)
+        self.style_options.append(self.style_show_text)
+        self.style_enabled.connect('toggled', self._visual_style_changed)
+        controls.append(_label('Ajuste da imagem não reposiciona o ícone: o renderizador '
+                               'atual oferece preencher, conter ou esticar. '
+                               'Deslocamentos X/Y atuam somente no texto.',
+                               wrap=True, style='caption'))
+        controls.append(_label('A prévia é gerada automaticamente após a edição; '
+                               'Salvar YAML e Aplicar IPC continuam separados.',
+                               wrap=True, style='caption'))
+
+    def _color_picker_changed(self, picker, _param_or_name, maybe_name=None):
+        # For notify::rgba the callback has (widget, pspec, name); for
+        # color-set it has (widget, name).
+        name = maybe_name if maybe_name is not None else _param_or_name
+        if self._style_color_syncing or self._quick_updating:
+            return
+        rgba = picker.get_rgba()
+        value = hex_from_rgb(rgba.red, rgba.green, rgba.blue)
+        self.style_colors[name].set_text(value)
+
+    def _color_entry_changed(self, entry, name):
+        if self._style_color_syncing or self._quick_updating:
+            return
+        value = entry.get_text()
+        if len(value) == 7 and value.startswith('#'):
+            rgba = Gdk.RGBA()
+            if rgba.parse(value):
+                self._style_color_syncing = True
+                try:
+                    self.style_pickers[name].set_rgba(rgba)
+                finally:
+                    self._style_color_syncing = False
+        self._visual_style_changed()
+
+    def _set_visual_style(self, raw):
+        style = ui_appearance(raw)
+        self.style_enabled.set_active(raw is not None)
+        self._style_color_syncing = True
+        try:
+            for name, entry in self.style_colors.items():
+                value = style[name]
+                entry.set_text(value)
+                rgba = Gdk.RGBA()
+                rgba.parse(value)
+                self.style_pickers[name].set_rgba(rgba)
+        finally:
+            self._style_color_syncing = False
+        for name, widget in self.style_choices.items():
+            widget.set_selected(CHOICES[name].index(style[name]))
+        for name, widget in self.style_numbers.items():
+            widget.set_value(style[name])
+        self.style_show_text.set_active(style['show_text'])
+        self._update_style_sensitivity()
+
+    def _read_visual_style(self):
+        fields = {name: entry.get_text() for name, entry in self.style_colors.items()}
+        fields.update({name: CHOICES[name][widget.get_selected()]
+                       for name, widget in self.style_choices.items()})
+        fields.update({name: int(widget.get_value())
+                       for name, widget in self.style_numbers.items()})
+        fields['show_text'] = self.style_show_text.get_active()
+        return validated_appearance(self.style_enabled.get_active(), fields)
+
+    def _update_style_sensitivity(self):
+        active = (self._quick_loaded is not None and self.style_enabled.get_active()
+                  and 'quick_save' not in self._busy)
+        self.style_options.set_sensitive(active)
+        self.style_enabled.set_sensitive(self._quick_loaded is not None and 'quick_save' not in self._busy)
+
+    def _visual_style_changed(self, *_):
+        self._update_style_sensitivity()
+        if self._quick_updating or self._quick_loaded is None:
+            return
+        self._quick_changed()
+        if self._style_preview_timer:
+            GLib.source_remove(self._style_preview_timer)
+        self._style_preview_timer = GLib.timeout_add(600, self._style_preview_delayed)
+
+    def _style_preview_delayed(self):
+        self._style_preview_timer = 0
+        if self._quick_loaded and self.stack.get_visible_child_name() == 'keys':
+            self._quick_preview()
+        return False
 
     def _quick_controls(self):
         loaded = self._quick_loaded is not None
@@ -359,6 +512,7 @@ class StudioWindow(Adw.ApplicationWindow):
         self.quick_preview_btn.set_sensitive(loaded and not busy)
         self.quick_save_btn.set_sensitive(loaded and not busy)
         self.quick_apply_btn.set_sensitive(loaded and self._quick_saved and not self._quick_dirty and not busy)
+        self._update_style_sensitivity()
         self.quick_icon_flow.set_sensitive(loaded and 'quick_save' not in self._busy)
         self.quick_import_icon_btn.set_sensitive('import_icon' not in self._busy and 'quick_save' not in self._busy)
 
@@ -385,13 +539,16 @@ class StudioWindow(Adw.ApplicationWindow):
                 'visual_text': self.quick_visual_text.get_text(),
                 'kind': KINDS[self.quick_kind.get_selected()],
                 'fields': [entry.get_text() for entry in self.quick_fields],
-                'appearance': self._quick_loaded['edited'].get('appearance')}
+                'appearance': self._read_visual_style()}
 
     def _quick_load(self):
         if not self._current:
             return
         self._quick_preview_snapshot = None
         self._quick_preview_queued = False
+        if self._style_preview_timer:
+            GLib.source_remove(self._style_preview_timer)
+            self._style_preview_timer = 0
         if self._quick_dirty:
             self.quick_state.set_text('Há alterações não salvas. Salve ou descarte antes de trocar de tecla.')
             return
@@ -468,6 +625,9 @@ class StudioWindow(Adw.ApplicationWindow):
         self._update_quick_icon_selection()
 
     def _quick_preview(self, *_):
+        if self._style_preview_timer:
+            GLib.source_remove(self._style_preview_timer)
+            self._style_preview_timer = 0
         if not self._quick_loaded:
             return
         try:
@@ -492,9 +652,17 @@ class StudioWindow(Adw.ApplicationWindow):
     def _quick_save(self, *_):
         if not self._quick_loaded:
             return
+        try:
+            form = self._quick_form()
+        except ValueError as exc:
+            self.quick_state.set_text(str(exc))
+            return
+        if self._style_preview_timer:
+            GLib.source_remove(self._style_preview_timer)
+            self._style_preview_timer = 0
         self._call('quick_save', profile=self._quick_loaded['profile'],
                    key_id=self._quick_loaded['key_id'], sha256=self._quick_loaded['sha256'],
-                   form=self._quick_form())
+                   form=form)
         self.quick_state.set_text('Validando YAML e salvando com backup…')
         self._quick_controls()
 
@@ -516,6 +684,7 @@ class StudioWindow(Adw.ApplicationWindow):
                 self.quick_label.set_text(data['label'])
                 self.quick_visual_text.set_text(data['visual_text'])
                 self.quick_image.set_text(data['image'])
+                self._set_visual_style(response['edited'].get('appearance'))
                 self._update_quick_icon_selection()
                 self.quick_kind.set_selected(KINDS.index(data['kind']))
                 for entry, value in zip(self.quick_fields, data['fields']):
@@ -528,7 +697,12 @@ class StudioWindow(Adw.ApplicationWindow):
         elif command == 'quick_preview':
             if not self._quick_loaded:
                 return
-            latest = (self._quick_loaded['profile'], self._quick_loaded['key_id'], self._quick_form())
+            try:
+                form = self._quick_form()
+            except ValueError:
+                # Formulário alterado durante a requisição: não exibir prévia antiga.
+                return
+            latest = (self._quick_loaded['profile'], self._quick_loaded['key_id'], form)
             request_matches = self._quick_preview_snapshot == latest
             response_matches = (response['profile'], response['key_id']) == latest[:2]
             if request_matches and response_matches and not self._quick_preview_queued:
