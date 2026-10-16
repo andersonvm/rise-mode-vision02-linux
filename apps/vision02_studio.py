@@ -29,6 +29,9 @@ from vision02.studio_visual_style import CHOICES, INT_RANGES, IMAGE_RANGES, COLO
 from vision02.studio_composition import clamp_drag, grid_coordinate
 from vision02.studio_tabs_layout import load_panel_width, save_panel_width
 from vision02.studio_visual_selection import hit_visual_element, visual_element_regions
+from vision02.studio_alpha_hit_v8 import (
+    extract_alpha, mask_candidates, choose_mask_layer, next_mask_layer, mask_regions,
+)
 from vision02.studio_composition_v4 import nudge_state, guides_at_position, coordinate_caption
 from vision02.studio_layers_v5 import (
     available_layers, hit_layer_candidates, next_overlapping_layer,
@@ -120,6 +123,7 @@ class StudioWindow(Adw.ApplicationWindow):
         self._composition_v6_locked = {'image': False, 'text': False}
         self._composition_v6_outlines = {'image': True, 'text': True}
         self._composition_v7_paths = {}  # quatro variantes locais RGB
+        self._composition_v8_masks = {}  # canais alfa 100x100, somente RAM
         self._composition_v7_visible = {'image': True, 'text': True}
         self._syncing = False
         self._sidebar_save_timer = 0
@@ -514,6 +518,11 @@ class StudioWindow(Adw.ApplicationWindow):
             check.connect('toggled', self._composition_v7_visibility_changed, layer)
             layers_box.append(check)
             self.composition_v7_visibility_checks[layer] = check
+        self.composition_v8_status = _label(
+            'Seleção: aguardando máscaras RGBA da prévia local.',
+            style='caption', wrap=True,
+        )
+        layers_box.append(self.composition_v8_status)
         layers_box.append(_label(
             'Os controles v7 mostram/ocultam pixels apenas na Composição. '
             'A prévia da aba Imagem, o YAML e o LCD continuam inalterados. '
@@ -707,6 +716,13 @@ class StudioWindow(Adw.ApplicationWindow):
                 horizontal=CHOICES['horizontal'][self.style_choices['horizontal'].get_selected()],
                 vertical=CHOICES['vertical'][self.style_choices['vertical'].get_selected()],
             )
+            # v8: moldura pelo conteúdo alfa real quando a prévia já foi gerada.
+            # Sem máscaras (perfil legado/erro): usa regiões aproximadas da v3.
+            if getattr(self, '_composition_v8_masks', None):
+                regions = mask_regions(
+                    self._composition_v8_masks, width, height,
+                    self._composition_zoom, visible=self._composition_v7_visible,
+                )
             target = 'image' if self.composition_target.get_selected() == 0 else 'text'
             outlines = getattr(self, '_composition_v6_outlines', {'image': True, 'text': True})
             region = regions.get(target) if outlines.get(target, True) else None
@@ -805,7 +821,10 @@ class StudioWindow(Adw.ApplicationWindow):
         can_cycle = False
         if active and self._composition_last_overlap is not None:
             x, y = self._composition_last_overlap
-            can_cycle = len(hit_layer_candidates(self._composition_layer_regions(), x, y)) == 2
+            if getattr(self, '_composition_v8_masks', None):
+                can_cycle = len(self._composition_v8_candidates(x, y)) == 2
+            else:
+                can_cycle = len(hit_layer_candidates(self._composition_layer_regions(), x, y)) == 2
         self.composition_cycle_overlap.set_sensitive(can_cycle)
         if hasattr(self, 'composition_v6_lock_checks'):
             for layer in ('image', 'text'):
@@ -838,9 +857,10 @@ class StudioWindow(Adw.ApplicationWindow):
             self._composition_last_overlap = None
         else:
             regions = self._composition_layer_regions()
-            self._composition_last_overlap = (
-                (x, y) if len(hit_layer_candidates(regions, x, y)) == 2 else None
-            )
+            candidates = (self._composition_v8_candidates(x, y)
+                          if getattr(self, '_composition_v8_masks', None) else
+                          hit_layer_candidates(regions, x, y))
+            self._composition_last_overlap = ((x, y) if len(candidates) == 2 else None)
         self._composition_update_layer_panel()
 
     def _composition_cycle_overlap_action(self, *_):
@@ -849,7 +869,10 @@ class StudioWindow(Adw.ApplicationWindow):
             return False
         x, y = self._composition_last_overlap
         current = 'image' if self.composition_target.get_selected() == 0 else 'text'
-        next_layer = next_overlapping_layer(self._composition_layer_regions(), x, y, current)
+        if getattr(self, '_composition_v8_masks', None):
+            next_layer = next_mask_layer(self._composition_v8_candidates(x, y), current)
+        else:
+            next_layer = next_overlapping_layer(self._composition_layer_regions(), x, y, current)
         if next_layer is None:
             self._composition_last_overlap = None
             self._composition_update_layer_panel()
@@ -860,6 +883,9 @@ class StudioWindow(Adw.ApplicationWindow):
         # Estado exclusivo do preview. Não marca edição pendente.
         self._composition_v7_visible[layer] = bool(check.get_active())
         self._composition_v7_update_picture()
+        self._composition_last_overlap = None
+        self._composition_update_layer_panel()
+        self.composition_canvas.queue_draw()
 
     def _composition_v7_update_picture(self):
         if not getattr(self, '_composition_v7_paths', None):
@@ -893,6 +919,46 @@ class StudioWindow(Adw.ApplicationWindow):
             self.composition_v7_visibility_checks[layer].set_sensitive(enabled)
         if enabled:
             self._composition_v7_update_picture()
+
+    def _composition_v8_set_components(self, paths):
+        """Carrega somente alfa no GTK; nenhum arquivo é modificado.
+
+        Caso faltem os dois RGBA válidos, retorna à seleção geométrica.
+        Esta chamada ocorre apenas depois da validação de revisão da prévia.
+        """
+        self._composition_v8_masks = {}
+        if isinstance(paths, dict):
+            try:
+                result = {}
+                for layer in ('image', 'text'):
+                    path = paths[layer]
+                    if not isinstance(path, str) or not path:
+                        raise ValueError('Canal ausente')
+                    pixbuf = GdkPixbuf.Pixbuf.new_from_file(path)
+                    result[layer] = extract_alpha(
+                        pixbuf.get_pixels(), pixbuf.get_width(), pixbuf.get_height(),
+                        pixbuf.get_rowstride(), pixbuf.get_n_channels(),
+                        has_alpha=pixbuf.get_has_alpha(),
+                    )
+                self._composition_v8_masks = result
+            except (KeyError, ValueError, TypeError, GLib.Error, OSError):
+                self._composition_v8_masks = {}
+        self.composition_v8_status.set_text(
+            'Seleção v8: pixels RGBA visíveis; molduras ajustadas ao conteúdo.'
+            if self._composition_v8_masks else
+            'Seleção por geometria aproximada (sem máscaras RGBA válidas).'
+        )
+        self._composition_last_overlap = None
+        self.composition_canvas.queue_draw()
+        self._composition_update_layer_panel()
+
+    def _composition_v8_candidates(self, x, y):
+        area = self.composition_canvas
+        return mask_candidates(
+            self._composition_v8_masks, x, y,
+            area.get_width(), area.get_height(), self._composition_zoom,
+            visible=self._composition_v7_visible,
+        )
 
     def _composition_v6_is_locked(self, layer):
         return is_layer_locked(self._composition_v6_locked, layer)
@@ -987,6 +1053,14 @@ class StudioWindow(Adw.ApplicationWindow):
         if self._quick_loaded is None or 'quick_save' in self._busy:
             return None
         area = self.composition_canvas
+        if getattr(self, '_composition_v8_masks', None):
+            candidates = self._composition_v8_candidates(x, y)
+            prefer = ('image' if getattr(self, 'composition_prefer_image', None) is not None
+                      and self.composition_prefer_image.get_active() else 'text')
+            selected = choose_mask_layer(candidates, prefer)
+            if selected is not None:
+                self.composition_target.set_selected(0 if selected == 'image' else 1)
+            return selected
         selected = hit_visual_element(
             x, y, area.get_width(), area.get_height(), self._composition_zoom,
             image_present=bool(self.quick_image.get_text().strip()),
@@ -1223,6 +1297,7 @@ class StudioWindow(Adw.ApplicationWindow):
 
     def _composition_zoom_changed(self, *_):
         self._composition_zoom = ZOOMS[self.composition_zoom.get_selected()]
+        self._composition_last_overlap = None
         self._composition_update_zoom()
         self.composition_canvas.queue_draw()
 
@@ -1431,6 +1506,11 @@ class StudioWindow(Adw.ApplicationWindow):
             self._composition_update_layer_panel()
         if self._quick_updating or self._quick_loaded is None:
             return
+        # Evita acertar pixels do preview anterior enquanto novos campos
+        # estão aguardando prévia. A seleção geométrica permanece disponível.
+        self._composition_v8_masks = {}
+        if hasattr(self, 'composition_v8_status'):
+            self.composition_v8_status.set_text('Seleção aproximada: atualize a prévia para máscaras RGBA.')
         self._quick_dirty = True
         self._quick_saved = False
         self.quick_state.set_text('Alterações não salvas — use Pré-visualizar e Salvar YAML.')
@@ -1458,6 +1538,8 @@ class StudioWindow(Adw.ApplicationWindow):
         if hasattr(self, '_composition_v6_reset_local'):
             self._composition_v6_reset_local()
         self._composition_v7_paths = {}
+        self._composition_v8_masks = {}
+        self.composition_v8_status.set_text('Seleção: aguardando máscaras RGBA da prévia local.')
         for layer in ('image', 'text'):
             self._composition_v7_visible[layer] = True
             check = self.composition_v7_visibility_checks[layer]
@@ -1647,6 +1729,7 @@ class StudioWindow(Adw.ApplicationWindow):
                     self._composition_preview_path = response['image']
                     self._composition_update_zoom()
                     self._composition_v7_set_paths(response.get('layers', {}))
+                    self._composition_v8_set_components(response.get('components', {}))
                     self.composition_canvas.queue_draw()
                     self.composition_status.set_text('Prévia local pronta: arraste dentro da borda azul.')
                     self.quick_state.set_text('Pré-visualização local pronta; não alterou o dispositivo.')
