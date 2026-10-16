@@ -23,6 +23,11 @@ from vision02_gui_data import build_metadata
 from vision02.user_profiles import default_profile_paths
 from vision02_editor_backend import inspect_profile, preview_key, save_key, save_batch_appearance
 from vision02.studio_inline_edit import form_to_key
+from vision02.studio_presets_v10 import (
+    list_presets, create_preset, rename_preset, delete_preset, apply_preset,
+    export_preset, import_preset, preview_data,
+)
+from vision02_editor_backend import _resolve_profile, _validate_at_same_location, preview_appearance
 
 
 def run(command: str, body: dict | None = None, *, project: Path = ROOT) -> dict:
@@ -69,6 +74,51 @@ def run(command: str, body: dict | None = None, *, project: Path = ROOT) -> dict
             raise ValueError('Revisão SHA-256 inválida')
         return {'profile': name, **save_batch_appearance(
             project, name, body['source_key'], body['targets'], expected)}
+    if command.startswith('preset_'):
+        if command == 'preset_list':
+            if body:
+                raise ValueError('Listagem não recebe argumentos')
+            return {'ok': True, 'presets': list_presets()}
+        if command == 'preset_create':
+            if set(body) != {'name', 'profile', 'key_id', 'sha256'}:
+                raise ValueError('Informe nome, perfil, origem e revisão')
+            path = _resolve_profile(project, body['profile'])
+            return {'ok': True, **create_preset(body['name'], path, body['key_id'], body['sha256'])}
+        if command == 'preset_rename':
+            if set(body) != {'id', 'name'}:
+                raise ValueError('Informe preset e novo nome')
+            return {'ok': True, **rename_preset(body['id'], body['name'])}
+        if command == 'preset_delete':
+            if set(body) != {'id'}:
+                raise ValueError('Informe preset')
+            return {'ok': True, **delete_preset(body['id'])}
+        if command == 'preset_import':
+            if set(body) != {'path'} or not isinstance(body['path'], str):
+                raise ValueError('Selecione o ZIP')
+            return {'ok': True, **import_preset(Path(body['path']))}
+        if command == 'preset_export':
+            if set(body) != {'id', 'path'} or not isinstance(body['path'], str):
+                raise ValueError('Informe preset e ZIP')
+            return {'ok': True, **export_preset(body['id'], Path(body['path']))}
+        if command == 'preset_apply':
+            if set(body) != {'id', 'profile', 'targets', 'sha256'}:
+                raise ValueError('Informe preset, perfil, destinos e revisão')
+            path = _resolve_profile(project, body['profile'])
+            return {'ok': True, 'profile': body['profile'], **apply_preset(
+                body['id'], path, body['targets'], body['sha256'], _validate_at_same_location)}
+        if command == 'preset_preview':
+            if set(body) != {'id', 'profile', 'key_id'} or type(body['key_id']) is not int or not 1 <= body['key_id'] <= 15:
+                raise ValueError('Informe preset, perfil e tecla')
+            info = inspect_profile(project, body['profile'])
+            entry = info['keys'][str(body['key_id'])]
+            manifest, image = preview_data(body['id'])
+            result = preview_appearance(project, body['profile'], {
+                'label': entry['label'] or ' ',
+                'image': str(image) if image else '',
+                'appearance': manifest['appearance'],
+            })
+            return {'ok': True, 'image': result['image'], 'id': body['id']}
+        raise ValueError('Comando de preset desconhecido')
     if command == 'status':
         if body:
             raise ValueError('status não recebe argumentos')
@@ -122,7 +172,8 @@ def main(argv=None):
     parser.add_argument('--command', required=True,
                         choices=('status', 'switch', 'reload', 'previews', 'live_preview', 'key_activity', 'icons',
                                  'quick_inspect', 'quick_preview', 'quick_save', 'quick_batch_appearance',
-                                 'import_icon', 'system', 'obs'))
+                                 'import_icon', 'system', 'obs', 'preset_list', 'preset_create', 'preset_rename',
+                                 'preset_delete', 'preset_import', 'preset_export', 'preset_apply', 'preset_preview'))
     args = parser.parse_args(argv)
     try:
         payload = json.load(sys.stdin) if not sys.stdin.isatty() and not sys.stdin.closed else {}

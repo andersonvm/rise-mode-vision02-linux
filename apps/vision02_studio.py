@@ -106,6 +106,8 @@ class StudioWindow(Adw.ApplicationWindow):
         self._quick_batch_clipboard = None  # origem persistida, perfil e SHA
         self._quick_batch_configured = set()
         self._quick_batch_pending_apply = False
+        self._preset_items = []
+        self._preset_pending_apply = False
         self._icons = []
         self._quick_icon_buttons = {}
         self._quick_import_target = None
@@ -428,6 +430,12 @@ class StudioWindow(Adw.ApplicationWindow):
         batch_box.set_margin_top(10)
         batch_expander.set_child(batch_box)
         self._build_batch_appearance_v9(batch_box)
+        preset_expander = Gtk.Expander(label='Biblioteca de presets visuais (v10)')
+        image_box.append(preset_expander)
+        preset_box = _box(False, 7)
+        preset_box.set_margin_top(10)
+        preset_expander.set_child(preset_box)
+        self._build_presets_v10(preset_box)
 
         # Aba Texto: rótulo, texto no LCD, tipografia, cores e alinhamento.
         text_box.append(_label('Rótulo'))
@@ -494,6 +502,196 @@ class StudioWindow(Adw.ApplicationWindow):
         parent.append(_label('Depois de salvar, clique em Aplicar ao dispositivo (IPC) '
                              'se desejar atualizar os LCDs físicos.', style='caption', wrap=True))
         self._quick_batch_controls()
+
+    def _build_presets_v10(self, parent):
+        parent.append(_label('Presets guardam somente imagem e estilo; ações e rótulos permanecem.',
+                             wrap=True, style='caption'))
+        self.preset_name = Gtk.Entry()
+        self.preset_name.set_placeholder_text('Nome do preset (ex.: OBS Azul)')
+        self.preset_name.connect('changed', self._preset_controls)
+        parent.append(self.preset_name)
+        self.preset_combo = Gtk.DropDown.new_from_strings(['Nenhum preset salvo'])
+        self.preset_combo.connect('notify::selected', self._preset_selected)
+        parent.append(self.preset_combo)
+        self.preset_create_btn = _button(parent, 'Salvar aparência da tecla como preset', self._preset_create)
+        row = _box(True, 5)
+        parent.append(row)
+        self.preset_rename_btn = _button(row, 'Renomear', self._preset_rename)
+        self.preset_delete_btn = _button(row, 'Excluir', self._preset_delete)
+        self.preset_preview_btn = _button(parent, 'Pré-visualizar preset (local)', self._preset_preview)
+        self.preset_picture = Gtk.Picture()
+        self.preset_picture.set_size_request(100, 100)
+        self.preset_picture.set_content_fit(Gtk.ContentFit.CONTAIN)
+        parent.append(self.preset_picture)
+        parent.append(_label('Destinos configurados no perfil atual:', style='caption'))
+        grid = Gtk.Grid(column_spacing=8, row_spacing=5)
+        parent.append(grid)
+        self.preset_targets = {}
+        for key_id in range(1, 16):
+            check = Gtk.CheckButton(label=f'{key_id:02d}')
+            check.connect('toggled', self._preset_target_toggled)
+            grid.attach(check, (key_id - 1) % 5, (key_id - 1) // 5, 1, 1)
+            self.preset_targets[key_id] = check
+        self.preset_confirm = Gtk.CheckButton(label='Confirmo substituir a aparência dos destinos marcados')
+        self.preset_confirm.connect('toggled', self._preset_controls)
+        parent.append(self.preset_confirm)
+        self.preset_apply_btn = _button(parent, 'Aplicar preset e salvar YAML com backup', self._preset_apply)
+        row = _box(True, 5)
+        parent.append(row)
+        self.preset_import_btn = _button(row, 'Importar ZIP…', self._preset_import)
+        self.preset_export_btn = _button(row, 'Exportar ZIP…', self._preset_export)
+        self.preset_status = _label('Nenhum preset modifica o dispositivo automaticamente.', wrap=True)
+        parent.append(self.preset_status)
+        self._preset_controls()
+        self._call('preset_list')
+
+    def _preset_active(self):
+        index = self.preset_combo.get_selected()
+        return (self._preset_items[index]['id']
+                if 0 <= index < len(self._preset_items) else None)
+
+    def _preset_selected(self, *_):
+        self.preset_confirm.set_active(False)
+        self.preset_picture.set_paintable(None)
+        self._preset_controls()
+
+    def _preset_target_toggled(self, *_):
+        self.preset_confirm.set_active(False)
+        self._preset_controls()
+
+    def _preset_busy(self):
+        return any(cmd in self._busy for cmd in ('quick_save', 'quick_batch_appearance',
+                   'quick_inspect', 'preset_apply', 'preset_create', 'preset_delete',
+                   'preset_rename', 'preset_import', 'preset_export'))
+
+    def _preset_controls(self, *_):
+        if not hasattr(self, 'preset_apply_btn'):
+            return
+        busy = self._preset_busy()
+        loaded = self._quick_loaded is not None and not self._quick_dirty and not busy
+        configured = self._selected_key in self._quick_batch_configured
+        name = bool(self.preset_name.get_text().strip())
+        selected = self._preset_active() is not None
+        self.preset_create_btn.set_sensitive(loaded and configured and name)
+        self.preset_rename_btn.set_sensitive(selected and name and not busy)
+        self.preset_delete_btn.set_sensitive(selected and not busy)
+        self.preset_preview_btn.set_sensitive(selected and loaded)
+        self.preset_import_btn.set_sensitive(not busy)
+        self.preset_export_btn.set_sensitive(selected and not busy)
+        for key_id, check in self.preset_targets.items():
+            enabled = loaded and selected and key_id in self._quick_batch_configured
+            check.set_sensitive(enabled)
+            if not enabled and check.get_active():
+                check.set_active(False)
+        targets = any(check.get_active() for check in self.preset_targets.values())
+        self.preset_confirm.set_sensitive(loaded and selected and targets)
+        self.preset_apply_btn.set_sensitive(loaded and selected and targets
+                                             and self.preset_confirm.get_active())
+
+    def _preset_create(self, *_):
+        if not self._quick_loaded or self._quick_dirty or self._preset_busy():
+            self.preset_status.set_text('Salve ou descarte a edição antes de criar um preset.')
+            return
+        self._call('preset_create', name=self.preset_name.get_text(), profile=self._current,
+                   key_id=self._selected_key, sha256=self._quick_loaded['sha256'])
+        self.preset_status.set_text('Salvando preset da aparência já gravada…')
+
+    def _preset_rename(self, *_):
+        if self._preset_active() and not self._preset_busy():
+            self._call('preset_rename', id=self._preset_active(), name=self.preset_name.get_text())
+
+    def _preset_delete(self, *_):
+        ident = self._preset_active()
+        if not ident or self._preset_busy():
+            return
+        dialog = Gtk.MessageDialog(transient_for=self, modal=True,
+             message_type=Gtk.MessageType.WARNING, buttons=Gtk.ButtonsType.NONE,
+             text='Excluir preset da biblioteca?')
+        dialog.format_secondary_text('Teclas já configuradas manterão a aparência aplicada.')
+        dialog.add_button('Cancelar', Gtk.ResponseType.CANCEL)
+        dialog.add_button('Excluir', Gtk.ResponseType.ACCEPT)
+        def done(widget, response):
+            widget.destroy()
+            if response == Gtk.ResponseType.ACCEPT:
+                self._call('preset_delete', id=ident)
+        dialog.connect('response', done)
+        dialog.present()
+
+    def _preset_preview(self, *_):
+        if self._preset_active() and self._quick_loaded and not self._quick_dirty:
+            self._call('preset_preview', id=self._preset_active(), profile=self._current,
+                       key_id=self._selected_key)
+            self.preset_status.set_text('Gerando prévia local do preset…')
+
+    def _preset_apply(self, *_):
+        ident = self._preset_active()
+        loaded = self._quick_loaded
+        targets = [key for key, check in self.preset_targets.items() if check.get_active()]
+        if not (ident and loaded and not self._quick_dirty and not self._preset_busy()
+                and targets and self.preset_confirm.get_active()
+                and all(key in self._quick_batch_configured for key in targets)):
+            self.preset_status.set_text('Seleção inválida; confira os destinos e a confirmação.')
+            return
+        self._call('preset_apply', id=ident, profile=self._current,
+                   targets=targets, sha256=loaded['sha256'])
+        self.preset_status.set_text('Validando aparência e salvando YAML com backup…')
+        self._preset_controls()
+
+    def _preset_file(self, action, callback, title, accept):
+        chooser = Gtk.FileChooserNative.new(title, self, action, accept, 'Cancelar')
+        if action == Gtk.FileChooserAction.SAVE:
+            chooser.set_current_name((self._preset_active() or 'preset') + '.zip')
+        def done(dialog, response):
+            selected = dialog.get_file()
+            path = selected.get_path() if selected is not None else None
+            dialog.destroy()
+            if response == Gtk.ResponseType.ACCEPT and path:
+                callback(path)
+        chooser.connect('response', done)
+        chooser.show()
+
+    def _preset_import(self, *_):
+        if not self._preset_busy():
+            self._preset_file(Gtk.FileChooserAction.OPEN,
+                              lambda path: self._call('preset_import', path=path),
+                              'Importar preset ZIP', 'Importar')
+
+    def _preset_export(self, *_):
+        ident = self._preset_active()
+        if ident and not self._preset_busy():
+            self._preset_file(Gtk.FileChooserAction.SAVE,
+                              lambda path: self._call('preset_export', id=ident, path=path),
+                              'Exportar preset ZIP', 'Exportar')
+
+    def _preset_received(self, command, response):
+        if command == 'preset_list':
+            old = self._preset_active()
+            self._preset_items = response['presets']
+            self.preset_combo.set_model(Gtk.StringList.new(
+                [p['name'] for p in self._preset_items] or ['Nenhum preset salvo']))
+            ids = [p['id'] for p in self._preset_items]
+            self.preset_combo.set_selected(ids.index(old) if old in ids else
+                                            (0 if ids else Gtk.INVALID_LIST_POSITION))
+            self.preset_status.set_text(f'{len(ids)} preset(s) na biblioteca.')
+        elif command == 'preset_preview':
+            if response['id'] == self._preset_active():
+                self.preset_picture.set_file(Gio.File.new_for_path(response['image']))
+                self.preset_status.set_text('Prévia gerada localmente; YAML e LCD não alterados.')
+        elif command == 'preset_apply':
+            self.preset_status.set_text(
+                f"{len(response['targets'])} tecla(s) com preset salvo. Backup: {response['backup']}")
+            self.preset_confirm.set_active(False)
+            self._quick_batch_clipboard = None
+            self._quick_batch_pending_apply = True
+            self._quick_dirty = False
+            self._quick_loaded = None
+            self._quick_load()
+            self._call('previews')
+        else:
+            self.preset_status.set_text(f'{command}: operação concluída.')
+            if command != 'preset_export':
+                self._call('preset_list')
+        self._preset_controls()
 
     def _quick_batch_target_toggled(self, *_):
         # Destinos diferentes exigem nova confirmação antes de gravar.
@@ -1609,6 +1807,8 @@ class StudioWindow(Adw.ApplicationWindow):
         self.quick_import_icon_btn.set_sensitive('import_icon' not in self._busy and 'quick_save' not in self._busy)
         if hasattr(self, 'quick_batch_apply_btn'):
             self._quick_batch_controls()
+        if hasattr(self, 'preset_apply_btn'):
+            self._preset_controls()
 
     def _quick_kind_changed(self, *_):
         kind = KINDS[self.quick_kind.get_selected()]
@@ -1831,6 +2031,7 @@ class StudioWindow(Adw.ApplicationWindow):
             # clicar em um botão oculto na parte inferior do painel.
             self._quick_preview()
             self._quick_batch_controls()
+            self._preset_controls()
         elif command == 'quick_preview':
             if not self._quick_loaded:
                 return
@@ -2016,6 +2217,9 @@ class StudioWindow(Adw.ApplicationWindow):
             if command == 'status':
                 self.top_status.set_text('Serviço indisponível')
                 self.dashboard_state.set_text(f'Serviço indisponível: {message}')
+            elif command.startswith('preset_'):
+                self.preset_status.set_text(f'Falha: {message}')
+                self._preset_controls()
             elif command.startswith('quick_'):
                 self.quick_state.set_text(f'Falha em {command}: {message}')
                 if command == 'quick_preview' and self._quick_preview_queued:
@@ -2038,6 +2242,9 @@ class StudioWindow(Adw.ApplicationWindow):
                 self.system_state.set_text(f'Métricas indisponíveis: {message}')
             else:
                 self.top_status.set_text(f'{command}: {message}')
+            return False
+        if command.startswith('preset_'):
+            self._preset_received(command, response)
             return False
         if command in {'quick_inspect', 'quick_preview', 'quick_save', 'quick_batch_appearance'}:
             self._quick_received(command, response)
@@ -2151,7 +2358,7 @@ class StudioWindow(Adw.ApplicationWindow):
     def _profile_selected(self, widget, _param):
         if self._syncing or not self._connected:
             return
-        if 'quick_batch_appearance' in self._busy:
+        if 'quick_batch_appearance' in self._busy or 'preset_apply' in self._busy:
             self._update_combo()
             return
         if self._quick_dirty:
@@ -2185,7 +2392,7 @@ class StudioWindow(Adw.ApplicationWindow):
         Não recriar filhos do botão durante o primeiro clique: isso pode
         interromper a sequência do gesto duplo em algumas versões de GTK.
         """
-        if 'quick_batch_appearance' in self._busy:
+        if 'quick_batch_appearance' in self._busy or 'preset_apply' in self._busy:
             self.quick_state.set_text('Aguarde a gravação em lote.')
             return
         if key_id != self._selected_key and self._quick_dirty:
