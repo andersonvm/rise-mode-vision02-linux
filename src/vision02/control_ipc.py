@@ -54,13 +54,13 @@ def _validate_request(raw: Any) -> tuple[str, str | None]:
     if not isinstance(raw, dict):
         raise ValueError("Mensagem deve ser um objeto JSON")
     command = raw.get("command")
-    if command in ("status", "profiles", "reload", "display_preview") and set(raw) == {"command"}:
+    if command in ("status", "profiles", "reload", "display_preview", "key_activity") and set(raw) == {"command"}:
         return command, None
     if command == "switch" and set(raw) == {"command", "target"}:
         target = raw["target"]
         if isinstance(target, str) and 1 <= len(target) <= 128 and target.strip() == target:
             return command, target
-    raise ValueError("Comando inválido; use status, profiles, reload, display_preview ou switch(target)")
+    raise ValueError("Comando inválido; use status, profiles, reload, display_preview, key_activity ou switch(target)")
 
 
 @dataclass

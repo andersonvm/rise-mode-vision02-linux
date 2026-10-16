@@ -14,6 +14,7 @@ from .profile_reload import FatalReloadError, reload_profiles
 from .actions.executor import close_wayland_keyboard
 from .device import Vision02, find_device
 from .display_preview import DisplayPreview, MirroredDevice
+from .key_activity import KeyActivity
 from .profiles import (
     ProfileManager,
     ProfileManagerError,
@@ -85,6 +86,7 @@ def build_parser() -> argparse.ArgumentParser:
     control_sub.add_parser("profiles", help="Perfis disponíveis")
     control_sub.add_parser("reload", help="Recarrega os YAML sem reiniciar HID")
     control_sub.add_parser("display_preview", help="Consulta as imagens exibidas nos LCDs")
+    control_sub.add_parser("key_activity", help="Consulta pressionamentos recentes das 15 teclas")
     control_switch = control_sub.add_parser("switch", help="Ativa um perfil existente")
     control_switch.add_argument("target", help="Nome exato do perfil")
 
@@ -122,6 +124,7 @@ def _run_profile(
 
     # Teclas cujos eventos devem ser ignorados até a liberação.
     blocked_keys: set[int] = set()
+    key_activity = KeyActivity()
 
     with Vision02() as original_device:
         preview = None
@@ -173,6 +176,8 @@ def _run_profile(
                 }
             if command == "profiles":
                 return {"profiles": list(manager.list_profiles())}
+            if command == "key_activity":
+                return key_activity.snapshot()
             if command == "display_preview":
                 if preview is None:
                     return {'active': manager.active_name, 'available': False,
@@ -191,6 +196,7 @@ def _run_profile(
                     reload_fatal = exc
                     raise
                 manager = updated
+                key_activity.reset()
                 switcher.manager = updated
                 dashboard.invalidate()
                 print(f"Perfis recarregados: {manager.active_name}", flush=True)
@@ -199,6 +205,7 @@ def _run_profile(
             if command == "switch" and target is not None:
                 changed = switcher.switch(target)
                 if changed:
+                    key_activity.reset()
                     dashboard.invalidate()
                     print(f"Perfil ativo: {manager.active_name}", flush=True)
                     remember_active()
@@ -250,6 +257,7 @@ def _run_profile(
                     continue
 
                 key_id, pressed = event
+                key_activity.record(key_id, pressed)
 
                 if not pressed:
                     blocked_keys.discard(key_id)
@@ -274,6 +282,7 @@ def _run_profile(
                     changed = switcher.switch(target)
 
                     if changed:
+                        key_activity.reset()
                         dashboard.invalidate()
                         print(
                             f"Perfil ativo: {manager.active_name}",

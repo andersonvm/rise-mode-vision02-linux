@@ -21,6 +21,7 @@ import gi
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
 from gi.repository import Adw, Gdk, Gio, GLib, Gtk, Pango
+from vision02.editor_navigation import parse_editor_target
 
 KINDS = ("none", "command", "url", "script", "hotkey", "profile", "obs")
 KIND_LABELS = ("Sem ação", "Comando", "URL", "Script", "Atalho", "Trocar perfil", "OBS WebSocket")
@@ -170,14 +171,16 @@ class IconLibraryWindow(Gtk.Window):
 
 
 class EditorWindow(Adw.ApplicationWindow):
-    def __init__(self, app):
+    def __init__(self, app, initial_profile=None, initial_key=1):
         super().__init__(application=app, title="Editor de teclas — Vision 02")
         self.set_default_size(1100, 780)
         self.set_size_request(780, 600)
         self.profile_names = backend("list")["profiles"]
-        self.profile_name = self.profile_names[0]
+        if initial_profile is not None and initial_profile not in self.profile_names:
+            raise ValueError(f"Perfil não encontrado: {initial_profile}")
+        self.profile_name = initial_profile or self.profile_names[0]
         self.profile = None
-        self.selected_key = 1
+        self.selected_key = initial_key
         self.dirty = False
         self.busy = False
         self._syncing = True
@@ -213,6 +216,7 @@ class EditorWindow(Adw.ApplicationWindow):
         top = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
         top.append(Gtk.Label(label="Perfil a editar:"))
         self.profile_combo = Gtk.DropDown.new_from_strings(self.profile_names)
+        self.profile_combo.set_selected(self.profile_names.index(self.profile_name))
         self.profile_combo.connect("notify::selected", self._on_profile_changed)
         top.append(self.profile_combo)
         obs_btn = Gtk.Button(label="Configurar OBS")
@@ -365,6 +369,30 @@ class EditorWindow(Adw.ApplicationWindow):
 
         self._load_profile()
         self._syncing = False
+
+    def navigate_to(self, profile: str | None, key_id: int) -> None:
+        """Abre a tecla solicitada, sem descartar edições não salvas."""
+        if self.busy or self.dirty:
+            self.status.set_text('Salve ou descarte a edição atual antes de abrir outra tecla.')
+            return
+        name = profile or self.profile_name
+        if name not in self.profile_names:
+            self.status.set_text(f'Perfil não disponível no editor: {name}')
+            return
+        self.selected_key = key_id
+        if name != self.profile_name:
+            self.profile_name = name
+            self._syncing = True
+            try:
+                self.profile_combo.set_selected(self.profile_names.index(name))
+            finally:
+                self._syncing = False
+            self._load_profile()
+        else:
+            self._populate_form()
+            self._highlight_selected()
+            self._schedule_live_preview()
+        self.status.set_text(f'Editando: {name} · tecla física {key_id:02d}')
 
     def _open_obs_panel(self, *_):
         if self.dirty:
@@ -839,18 +867,38 @@ class EditorWindow(Adw.ApplicationWindow):
 
 class EditorApp(Adw.Application):
     def __init__(self):
-        super().__init__(application_id="io.github.vision02.Editor")
+        super().__init__(application_id="io.github.vision02.Editor",
+                         flags=Gio.ApplicationFlags.HANDLES_COMMAND_LINE)
+        self._requested_target = (None, 1)
+        self.connect("command-line", self._command_line)
         self.connect("activate", self._activate)
 
-    def _activate(self, app):
+    def _command_line(self, _app, command_line):
+        argv = [part.decode('utf-8') if isinstance(part, bytes) else str(part)
+                for part in command_line.get_arguments()]
+        try:
+            self._requested_target = parse_editor_target(argv[1:])
+        except ValueError as exc:
+            command_line.printerr(f'vision02-editor: {exc}\n')
+            return 2
+        self.activate()
+        return 0
+
+    def _activate(self, _app):
+        profile, key_id = self._requested_target
+        self._requested_target = (None, 1)
         win = self.props.active_window
+        if win is None and self.get_windows():
+            win = self.get_windows()[0]
         if win is None:
             try:
-                win = EditorWindow(self)
+                win = EditorWindow(self, initial_profile=profile, initial_key=key_id)
             except (RuntimeError, OSError, ValueError, subprocess.SubprocessError) as exc:
                 print(f"Não foi possível abrir o editor: {exc}", file=sys.stderr)
                 self.quit()
                 return
+        elif profile is not None:
+            win.navigate_to(profile, key_id)
         win.present()
 
 

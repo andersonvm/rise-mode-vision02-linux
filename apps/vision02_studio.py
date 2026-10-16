@@ -21,6 +21,8 @@ gi.require_version('Gtk', '4.0')
 gi.require_version('Adw', '1')
 from gi.repository import Adw, Gdk, Gio, GLib, Gtk, Pango
 
+from vision02.editor_navigation import editor_args
+from vision02.studio_interaction import DoubleClickDetector
 from vision02_studio_layout import (
     MIN_SIDEBAR_WIDTH, load_sidebar_width, save_sidebar_width,
 )
@@ -72,6 +74,12 @@ class StudioWindow(Adw.ApplicationWindow):
         self._live_active = ''
         self._live_revision = -1
         self._selected_key = 1
+        self._physical_pressed = set()
+        self._last_physical = None
+        self._click_detector = DoubleClickDetector(interval_seconds=0.60)
+        self._key_number_labels = {}
+        self._key_status_labels = {}
+        self._key_highlight_css = None
         self._icons = []
         self._syncing = False
         self._sidebar_save_timer = 0
@@ -120,6 +128,7 @@ class StudioWindow(Adw.ApplicationWindow):
         self.navigation.connect('notify::position', self._sidebar_position_changed)
 
         self._build_dashboard()
+        self._install_key_highlight_css()
         self._build_keys()
         self._build_profiles()
         self._build_icons()
@@ -135,6 +144,7 @@ class StudioWindow(Adw.ApplicationWindow):
         self._call('icons')
         self._timer = GLib.timeout_add_seconds(4, self._tick)
         self._preview_timer = GLib.timeout_add_seconds(2, self._preview_tick)
+        self._activity_timer = GLib.timeout_add(650, self._activity_tick)
         self.connect('close-request', self._on_close)
 
     def _page(self, key, title, description):
@@ -166,10 +176,34 @@ class StudioWindow(Adw.ApplicationWindow):
                            'O Studio consulta o IPC, não abre o dispositivo HID.',
                            style='caption', wrap=True))
 
+    def _install_key_highlight_css(self):
+        """Destaque explícito, independente do tema Adwaita/card do botão."""
+        display = Gdk.Display.get_default()
+        if display is None:
+            return
+        provider = Gtk.CssProvider()
+        provider.load_from_data(b"""
+            button.vision02-key-selected {
+                border: 2px solid #3584e4;
+            }
+            button.vision02-key-pressed {
+                border: 4px solid #e5a327;
+                background-color: rgba(229, 163, 39, 0.25);
+            }
+            label.vision02-key-status-active {
+                color: #e5a327;
+                font-weight: bold;
+            }
+        """)
+        Gtk.StyleContext.add_provider_for_display(
+            display, provider, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION
+        )
+        self._key_highlight_css = provider
+
     def _build_keys(self):
         page = self._page('keys', 'Teclas',
                           'Espelho dos 15 LCDs: imagem enviada pelo serviço, atualizada a cada 2 segundos. '
-                          'Clique para inspecionar; nenhuma ação é executada aqui.')
+                          'Clique para selecionar; clique duas vezes para editar. Nenhuma ação física é executada.')
         row = _box(True)
         page.append(row)
         row.append(_label('Perfil:'))
@@ -178,10 +212,12 @@ class StudioWindow(Adw.ApplicationWindow):
         self.profile_combo.connect('notify::selected', self._profile_selected)
         row.append(self.profile_combo)
         _button(row, 'Atualizar prévias', lambda *_: self._call('previews'))
-        _button(row, 'Editar teclas', lambda *_: self._launch('teclas'))
+        _button(row, 'Editar tecla selecionada', self._edit_selected_key)
         self.key_grid = Gtk.Grid(column_spacing=8, row_spacing=8)
         self.key_grid.set_column_homogeneous(True)
         page.append(self.key_grid)
+        self.key_activity_label = _label('Pressione uma tecla física para verificar o destaque.', wrap=True)
+        page.append(self.key_activity_label)
         self.key_buttons = {}
         for ident in range(1, 16):
             button = Gtk.Button()
@@ -272,12 +308,19 @@ class StudioWindow(Adw.ApplicationWindow):
         _button(row, 'Gerenciar perfis', lambda *_: self._launch('perfis'))
         _button(row, 'Painel legado', lambda *_: self._launch('dashboard'))
 
-    def _launch(self, tool):
+    def _launch(self, tool, *, profile=None, key_id=None):
         if tool not in TOOLS:
             return
         executable = ROOT / 'scripts' / TOOLS[tool]
+        command = [str(executable)]
+        if tool == 'teclas' and profile is not None and key_id is not None:
+            try:
+                command.extend(editor_args(profile, key_id))
+            except ValueError as exc:
+                self.top_status.set_text(f'Não foi possível selecionar tecla: {exc}')
+                return
         try:
-            subprocess.Popen([str(executable)], cwd=str(ROOT), start_new_session=True)
+            subprocess.Popen(command, cwd=str(ROOT), start_new_session=True)
         except OSError as exc:
             self.top_status.set_text(f'Não foi possível abrir {TOOLS[tool]}: {exc}')
 
@@ -313,6 +356,11 @@ class StudioWindow(Adw.ApplicationWindow):
             if command == 'status':
                 self.top_status.set_text('Serviço indisponível')
                 self.dashboard_state.set_text(f'Serviço indisponível: {message}')
+            elif command == 'key_activity':
+                self.key_activity_label.set_text(
+                    'Sem eventos via IPC: ' + str(message) +
+                    '. Confirme o reinício de vision02.service.'
+                )
             elif command == 'obs':
                 self.obs_state.set_text(f'OBS indisponível: {message}')
             elif command == 'system':
@@ -344,6 +392,14 @@ class StudioWindow(Adw.ApplicationWindow):
         elif command == 'previews':
             self._previews = response.get('profiles') or {}
             self._render_keys()
+        elif command == 'key_activity':
+            pressed = {key for key in response.get('pressed_keys', []) if type(key) is int and 1 <= key <= 15}
+            last = response.get('last_key')
+            last = last if type(last) is int and 1 <= last <= 15 else None
+            if pressed != self._physical_pressed or last != self._last_physical:
+                self._physical_pressed = pressed
+                self._last_physical = last
+                self._update_key_highlight()
         elif command == 'live_preview':
             active = response.get('active') or ''
             revision = response.get('revision', -1)
@@ -425,11 +481,70 @@ class StudioWindow(Adw.ApplicationWindow):
             self.profile_list.append(row)
 
     def _key_selected(self, _button, key_id):
+        """Usa o sinal clicked do próprio Gtk.Button para contar os cliques.
+
+        Não recriar filhos do botão durante o primeiro clique: isso pode
+        interromper a sequência do gesto duplo em algumas versões de GTK.
+        """
+        double_click = self._click_detector.click(key_id)
         self._selected_key = key_id
-        self._render_keys()
+        self._update_key_highlight()
+        self._update_key_detail()
+        if double_click:
+            self._edit_selected_key()
+
+    def _edit_selected_key(self, *_):
+        if not self._current:
+            self.top_status.set_text('Nenhum perfil ativo para edição')
+            return
+        self._launch('teclas', profile=self._current, key_id=self._selected_key)
+
+    def _update_key_detail(self):
+        keys = {item['id']: item for item in self._previews.get(self._current, {}).get('keys', [])}
+        key = keys.get(self._selected_key, {})
+        self.key_detail.set_text(
+            f"Tecla física {self._selected_key:02d}  |  "
+            f"LCD {key.get('display_id', '—')}  |  "
+            f"{key.get('label') or 'Sem rótulo'}  |  "
+            f"Ação: {key.get('action') or 'Nenhuma'}  |  "
+            f"Imagem: {'LCD ao vivo' if self._live_active == self._current and self._live_images else 'Prévia YAML'}"
+        )
+
+    def _update_key_highlight(self):
+        for ident, button in self.key_buttons.items():
+            physical_pressed = ident in self._physical_pressed
+            recent = ident == self._last_physical
+            active = physical_pressed or recent
+            if active:
+                button.add_css_class('vision02-key-pressed')
+            else:
+                button.remove_css_class('vision02-key-pressed')
+            if ident == self._selected_key:
+                button.add_css_class('vision02-key-selected')
+            else:
+                button.remove_css_class('vision02-key-selected')
+            number_label = self._key_number_labels.get(ident)
+            if number_label is not None:
+                number_label.set_text(f'{ident:02d}' + (' • SELECIONADA' if ident == self._selected_key else ''))
+            status_label = self._key_status_labels.get(ident)
+            if status_label is not None:
+                status_label.set_text('PRESSIONADA' if physical_pressed else 'RECENTE' if recent else '')
+                if active:
+                    status_label.add_css_class('vision02-key-status-active')
+                else:
+                    status_label.remove_css_class('vision02-key-status-active')
+        if self._physical_pressed:
+            keys = ', '.join(f'{key:02d}' for key in sorted(self._physical_pressed))
+            self.key_activity_label.set_text(f'Tecla(s) física(s) pressionada(s): {keys}')
+        elif self._last_physical is not None:
+            self.key_activity_label.set_text(f'Última tecla física: {self._last_physical:02d} (recente)')
+        else:
+            self.key_activity_label.set_text('Aguardando pressionamento físico…')
 
     def _render_keys(self):
         keys = {row['id']: row for row in self._previews.get(self._current, {}).get('keys', [])}
+        self._key_number_labels = {}
+        self._key_status_labels = {}
         for key_id, button in self.key_buttons.items():
             item = keys.get(key_id, {})
             cell = _box(False, 3)
@@ -458,18 +573,17 @@ class StudioWindow(Adw.ApplicationWindow):
                 blank = _label('—')
                 blank.set_size_request(92, 92)
                 cell.append(blank)
-            title = _label(f'{key_id:02d}' + (' •' if key_id == self._selected_key else ''))
+            title = _label(f'{key_id:02d}')
             title.set_halign(Gtk.Align.CENTER)
             cell.append(title)
+            self._key_number_labels[key_id] = title
+            status = _label('', style='caption')
+            status.set_halign(Gtk.Align.CENTER)
+            cell.append(status)
+            self._key_status_labels[key_id] = status
             button.set_child(cell)
-        key = keys.get(self._selected_key, {})
-        self.key_detail.set_text(
-            f"Tecla física {self._selected_key:02d}  |  "
-            f"LCD {key.get('display_id', '—')}  |  "
-            f"{key.get('label') or 'Sem rótulo'}  |  "
-            f"Ação: {key.get('action') or 'Nenhuma'}  |  "
-            f"Imagem: {'LCD ao vivo' if self._live_active == self._current and self._live_images else 'Prévia YAML'}"
-        )
+        self._update_key_highlight()
+        self._update_key_detail()
 
     def _render_icons(self):
         search = self.search_icons.get_text().casefold().strip()
@@ -525,6 +639,13 @@ class StudioWindow(Adw.ApplicationWindow):
     def _on_page(self, *_):
         self._refresh_current()
 
+    def _activity_tick(self):
+        if self._closed:
+            return False
+        if self.stack.get_visible_child_name() == 'keys':
+            self._call('key_activity')
+        return True
+
     def _preview_tick(self):
         if self._closed:
             return False
@@ -571,6 +692,9 @@ class StudioWindow(Adw.ApplicationWindow):
         if self._timer:
             GLib.source_remove(self._timer)
             self._timer = 0
+        if self._activity_timer:
+            GLib.source_remove(self._activity_timer)
+            self._activity_timer = 0
         return False
 
 

@@ -45,6 +45,10 @@ def run(command: str, body: dict | None = None, *, project: Path = ROOT) -> dict
             raise ValueError('previews não recebe argumentos')
         result = build_metadata(project, default_profile_paths(project))
         return {'ok': True, **result}
+    if command == 'key_activity':
+        if body:
+            raise ValueError('key_activity não recebe argumentos')
+        return ipc_request('key_activity', timeout=7)
     if command == 'live_preview':
         if body:
             raise ValueError('live_preview não recebe argumentos')
@@ -75,7 +79,7 @@ def run(command: str, body: dict | None = None, *, project: Path = ROOT) -> dict
 def main(argv=None):
     parser = argparse.ArgumentParser(description='Vision 02 Studio — backend JSON seguro')
     parser.add_argument('--command', required=True,
-                        choices=('status', 'switch', 'reload', 'previews', 'live_preview', 'icons',
+                        choices=('status', 'switch', 'reload', 'previews', 'live_preview', 'key_activity', 'icons',
                                  'import_icon', 'system', 'obs'))
     args = parser.parse_args(argv)
     try:
