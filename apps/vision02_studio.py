@@ -29,6 +29,7 @@ from vision02.studio_visual_style import CHOICES, INT_RANGES, IMAGE_RANGES, COLO
 from vision02.studio_composition import clamp_drag, grid_coordinate
 from vision02.studio_tabs_layout import load_panel_width, save_panel_width
 from vision02.studio_visual_selection import hit_visual_element, visual_element_regions
+from vision02.studio_composition_v4 import nudge_state, guides_at_position, coordinate_caption
 from vision02.studio_composition_v2 import (
     CompositionHistory, FIELDS, ZOOMS, state_from_fields, apply_state,
     default_target, smart_snap, anchors_for_target, display_geometry,
@@ -463,6 +464,29 @@ class StudioWindow(Adw.ApplicationWindow):
         column.append(self.composition_prefer_image)
         self.composition_grid = Gtk.CheckButton(label='Encaixar na grade de 5 pixels')
         column.append(self.composition_grid)
+        self.composition_align = Gtk.CheckButton(
+            label='Encaixe inteligente no centro e nas bordas (sem grade)'
+        )
+        self.composition_align.set_active(True)
+        self.composition_align.connect('toggled', self._composition_alignment_changed)
+        column.append(self.composition_align)
+        self.composition_coordinates = _label('Posição do elemento selecionado', style='caption')
+        column.append(self.composition_coordinates)
+        nudge_row = _box(True, 6)
+        column.append(nudge_row)
+        nudge_row.append(_label('Ajuste fino:'))
+        self.composition_nudge_step = Gtk.DropDown.new_from_strings(['1 px', '5 px'])
+        nudge_row.append(self.composition_nudge_step)
+        self.composition_nudge_buttons = []
+        for direction, title in (('left', '←'), ('up', '↑'),
+                                 ('down', '↓'), ('right', '→')):
+            button = _button(nudge_row, title,
+                             lambda _button, direction=direction: self._composition_nudge(direction))
+            button.set_tooltip_text('Mover elemento para ' + {
+                'left': 'esquerda', 'up': 'cima',
+                'down': 'baixo', 'right': 'direita',
+            }[direction])
+            self.composition_nudge_buttons.append(button)
         zoom_row = _box(True, 8)
         column.append(zoom_row)
         zoom_row.append(_label('Zoom da edição:'))
@@ -474,9 +498,12 @@ class StudioWindow(Adw.ApplicationWindow):
         self.composition_undo = _button(tools, 'Desfazer', self._composition_undo_action)
         self.composition_redo = _button(tools, 'Refazer', self._composition_redo_action)
         self.composition_reset = _button(column, 'Restaurar posição/tamanho do elemento', self._composition_reset_action)
-        column.append(_label('Ctrl+Z / Ctrl+Shift+Z fora dos campos de texto. '
-                             'Arraste a alça no canto inferior direito do ícone para redimensionar.',
+        column.append(_label('Ctrl+Setas: mover 1 px; Ctrl+Shift+Setas: mover 5 px '
+                             '(somente na aba Composição, fora de campos editáveis). '
+                             'Ctrl+Z / Ctrl+Shift+Z: desfazer/refazer. '
+                             'Arraste a alça ↘ para redimensionar.',
                              style='caption', wrap=True))
+        self._composition_update_coordinates()
 
         # O Gtk.Picture é responsável por mostrar o PNG; o DrawingArea só
         # desenha guias transparentes. Isso evita uma tela vazia quando o
@@ -613,11 +640,47 @@ class StudioWindow(Adw.ApplicationWindow):
                 else 'Seleção atual: Texto'
             )
         self._composition_update_buttons()
+        if hasattr(self, '_composition_update_coordinates'):
+            self._composition_update_coordinates()
         self.composition_canvas.queue_draw()
 
     def _composition_selection_priority_changed(self, *_):
         # Apenas hit-test local; não modifica o perfil nem o estado dirty.
         self.composition_canvas.queue_draw()
+
+    def _composition_alignment_changed(self, *_):
+        # Opção de encaixe é local: não entra no YAML nem no histórico.
+        self._composition_guide = (None, None)
+        self.composition_canvas.queue_draw()
+
+    def _composition_update_coordinates(self):
+        if not hasattr(self, 'composition_coordinates'):
+            return
+        target = 'image' if self.composition_target.get_selected() == 0 else 'text'
+        self.composition_coordinates.set_text(
+            coordinate_caption(state_from_fields(self.style_numbers), target)
+        )
+
+    def _composition_nudge(self, direction, step=None):
+        if self._quick_loaded is None or 'quick_save' in self._busy:
+            return False
+        target = 'image' if self.composition_target.get_selected() == 0 else 'text'
+        if step is None:
+            step = (1, 5)[self.composition_nudge_step.get_selected()]
+        field = 'image_x' if target == 'image' else 'offset_x'
+        bounds = ({**INT_RANGES, **IMAGE_RANGES})[field]
+        before = state_from_fields(self.style_numbers)
+        after = nudge_state(before, target, direction, step, bounds)
+        if before == after:
+            self.composition_status.set_text('Limite de posição atingido; nada foi alterado.')
+            return False
+        if self._composition_history.record(before, after):
+            self._composition_restore_state(after, coordinate_caption(after, target))
+            if self.composition_align.get_active():
+                self._composition_guide = guides_at_position(after, target)
+            self.composition_canvas.queue_draw()
+            return True
+        return False
 
     def _composition_pick_target(self, x, y):
         # Hit-test local sobre o preview composto, sem ler/gravar o YAML.
@@ -732,9 +795,12 @@ class StudioWindow(Adw.ApplicationWindow):
             value = clamp_drag(self._composition_drag_start[index], diff, unit, lower, upper)
             if snap:
                 value = grid_coordinate(value, lower, upper)
-            else:
+            elif (not hasattr(self, 'composition_align')
+                  or self.composition_align.get_active()):
                 value, guide = smart_snap(value, lower, upper, anchors)
-            guide = value if value in anchors else None
+            guide = (value if value in anchors and
+                     (not hasattr(self, 'composition_align')
+                      or self.composition_align.get_active()) else None)
             self.style_numbers[field].set_value(value)
             result.append(value)
             guides.append(guide)
@@ -759,6 +825,10 @@ class StudioWindow(Adw.ApplicationWindow):
         self.composition_undo.set_sensitive(ready and bool(self._composition_history.undo_stack))
         self.composition_redo.set_sensitive(ready and bool(self._composition_history.redo_stack))
         self.composition_reset.set_sensitive(ready)
+        if hasattr(self, 'composition_nudge_buttons'):
+            for button in self.composition_nudge_buttons:
+                button.set_sensitive(ready)
+            self.composition_nudge_step.set_sensitive(ready)
         # Alça só aparece para uma tecla carregada no modo Imagem.
         self.composition_resize_handle.set_visible(
             ready and self.composition_target.get_selected() == 0
@@ -806,6 +876,14 @@ class StudioWindow(Adw.ApplicationWindow):
         focus = self.get_focus()
         if isinstance(focus, (Gtk.Entry, Gtk.TextView, Gtk.SpinButton)):
             return False
+        # Escopo: aba Composição. Não roubar Ctrl+Setas de outras abas.
+        directions = {Gdk.KEY_Left: 'left', Gdk.KEY_Right: 'right',
+                      Gdk.KEY_Up: 'up', Gdk.KEY_Down: 'down'}
+        if keyval in directions:
+            if self.quick_tabs.get_current_page() != 3:
+                return False
+            step = 5 if state & Gdk.ModifierType.SHIFT_MASK else 1
+            return self._composition_nudge(directions[keyval], step=step)
         if keyval not in (Gdk.KEY_z, Gdk.KEY_Z):
             return False
         if state & Gdk.ModifierType.SHIFT_MASK:
@@ -977,6 +1055,8 @@ class StudioWindow(Adw.ApplicationWindow):
 
     def _visual_style_changed(self, *_):
         self._update_style_sensitivity()
+        if hasattr(self, 'composition_coordinates'):
+            self._composition_update_coordinates()
         # Redesenha a moldura junto com as alterações dos campos da aparência.
         if hasattr(self, 'composition_canvas'):
             self.composition_canvas.queue_draw()
