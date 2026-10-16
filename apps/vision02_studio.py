@@ -27,6 +27,7 @@ from vision02.studio_inline_edit import KINDS, HINTS, key_to_form
 from vision02.studio_icon_gallery import filtered_icons, icon_by_path
 from vision02.studio_visual_style import CHOICES, INT_RANGES, IMAGE_RANGES, COLORS, ui_appearance, validated_appearance, hex_from_rgb
 from vision02.studio_composition import clamp_drag, grid_coordinate
+from vision02.studio_tabs_layout import load_panel_width, save_panel_width
 from vision02.studio_composition_v2 import (
     CompositionHistory, FIELDS, ZOOMS, state_from_fields, apply_state,
     default_target, smart_snap, anchors_for_target, display_geometry,
@@ -110,6 +111,7 @@ class StudioWindow(Adw.ApplicationWindow):
         self._composition_preview_path = None
         self._syncing = False
         self._sidebar_save_timer = 0
+        self._panel_save_timer = 0
 
         toolbar = Adw.ToolbarView()
         header = Adw.HeaderBar()
@@ -270,7 +272,9 @@ class StudioWindow(Adw.ApplicationWindow):
         # ficam disponíveis numa segunda coluna, sem comprimir os 15 LCDs.
         editor_split = Gtk.Paned.new(Gtk.Orientation.HORIZONTAL)
         editor_split.set_wide_handle(True)
-        editor_split.set_position(665)
+        editor_split.set_position(load_panel_width())
+        editor_split.connect('notify::position', self._panel_position_changed)
+        self.editor_split = editor_split
         editor_split.set_resize_start_child(True)
         editor_split.set_resize_end_child(False)
         editor_split.set_shrink_start_child(False)
@@ -280,6 +284,7 @@ class StudioWindow(Adw.ApplicationWindow):
         key_scroll = Gtk.ScrolledWindow()
         key_scroll.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
         key_scroll.set_min_content_height(510)
+        key_scroll.set_min_content_width(220)
         grid_box = _box(False, 12)
         key_scroll.set_child(grid_box)
         editor_split.set_start_child(key_scroll)
@@ -302,34 +307,73 @@ class StudioWindow(Adw.ApplicationWindow):
         self._render_keys()
 
     def _build_quick_properties(self, editor_split):
-        props_scroll = Gtk.ScrolledWindow()
-        props_scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
-        props_scroll.set_min_content_width(295)
-        box = _box(False, 9)
-        box.set_margin_start(14)
-        box.set_margin_end(10)
-        box.set_margin_top(6)
-        box.set_margin_bottom(16)
-        props_scroll.set_child(box)
+        # Raiz fixa: cabeçalho e comandos sempre visíveis, mesmo quando o
+        # formulário de uma aba necessita de rolagem vertical.
+        # Nome props_scroll preservado por compatibilidade com testes antigos.
+        props_scroll = _box(False, 8)
+        props_scroll.set_size_request(300, -1)
+        props_scroll.set_margin_start(12)
+        props_scroll.set_margin_end(8)
+        props_scroll.set_margin_top(6)
+        props_scroll.set_margin_bottom(12)
         editor_split.set_end_child(props_scroll)
-        box.append(_label('Propriedades da tecla', style='title-3'))
+        props_scroll.append(_label('Propriedades da tecla', style='title-3'))
         self.quick_target = _label('Selecione uma tecla para editar.', wrap=True)
-        box.append(self.quick_target)
-        box.append(_label('Rótulo'))
-        self.quick_label = Gtk.Entry()
-        box.append(self.quick_label)
-        box.append(_label('Texto visual no LCD (opcional)'))
-        self.quick_visual_text = Gtk.Entry()
-        self.quick_visual_text.set_placeholder_text('Vazio: usa o rótulo da tecla')
-        box.append(self.quick_visual_text)
-        box.append(_label('Imagem (caminho local)'))
+        props_scroll.append(self.quick_target)
+
+        # A opção de aparência é comum às abas Texto e Composição; deixá-la
+        # acima das abas evita controles inacessíveis quando o usuário arrasta.
+        self.style_enabled = Gtk.CheckButton(label='Usar aparência personalizada')
+        props_scroll.append(self.style_enabled)
+
+        self.quick_tabs = Gtk.Notebook()
+        self.quick_tabs.set_scrollable(True)
+        self.quick_tabs.set_show_border(False)
+        self.quick_tabs.set_vexpand(True)
+        props_scroll.append(self.quick_tabs)
+
+        def make_tab(title):
+            scroller = Gtk.ScrolledWindow()
+            scroller.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+            scroller.set_vexpand(True)
+            contents = _box(False, 8)
+            contents.set_margin_start(4)
+            contents.set_margin_end(6)
+            contents.set_margin_top(10)
+            contents.set_margin_bottom(12)
+            scroller.set_child(contents)
+            self.quick_tabs.append_page(scroller, Gtk.Label(label=title))
+            return contents
+
+        action_box = make_tab('Ação')
+        image_box = make_tab('Imagem')
+        text_box = make_tab('Texto')
+        composition_box = make_tab('Composição')
+
+        # Aba Ação: campos mudam conforme o tipo, mantendo o formulário
+        # validado do editor anterior.
+        action_box.append(_label('Tipo de ação'))
+        self.quick_kind = Gtk.DropDown.new_from_strings(
+            ['Sem ação (limpar)', 'Comando', 'URL', 'Script', 'Atalho', 'Trocar perfil', 'OBS']
+        )
+        action_box.append(self.quick_kind)
+        self.quick_hint = _label('', style='caption', wrap=True)
+        action_box.append(self.quick_hint)
+        self.quick_fields = []
+        for idx in range(4):
+            entry = Gtk.Entry()
+            entry.set_placeholder_text(f'Campo {idx + 1}')
+            self.quick_fields.append(entry)
+            action_box.append(entry)
+
+        # Aba Imagem: galeria e importação continuam ligadas ao mesmo
+        # campo quick_image, sem efeitos no YAML até Salvar.
+        image_box.append(_label('Imagem (caminho local)'))
         self.quick_image = Gtk.Entry()
-        box.append(self.quick_image)
-        # Galeria embutida: usa os mesmos registros da página Ícones,
-        # mas seleciona diretamente o caminho da tecla em edição.
+        image_box.append(self.quick_image)
         gallery = Gtk.Expander(label='Galeria visual de ícones')
         gallery.set_expanded(True)
-        box.append(gallery)
+        image_box.append(gallery)
         gallery_box = _box(False, 7)
         gallery.set_child(gallery_box)
         self.quick_icon_search = Gtk.SearchEntry()
@@ -353,44 +397,45 @@ class StudioWindow(Adw.ApplicationWindow):
             gallery_box, 'Importar imagem para a galeria…',
             lambda *_: self._choose_icon(for_quick=True)
         )
-        gallery_box.append(_label('Um clique escolhe o ícone e gera uma prévia local. '
-                                  'Para alterar o LCD: Salvar YAML → Aplicar IPC.',
+        gallery_box.append(_label('Escolha o ícone para prévia local; a aplicação ao LCD exige salvar e aplicar.',
                                   style='caption', wrap=True))
-        self._build_visual_style(box)
-        box.append(_label('Ação'))
-        self.quick_kind = Gtk.DropDown.new_from_strings(
-            ['Sem ação (limpar)', 'Comando', 'URL', 'Script', 'Atalho', 'Trocar perfil', 'OBS']
-        )
-        box.append(self.quick_kind)
-        self.quick_hint = _label('', style='caption', wrap=True)
-        box.append(self.quick_hint)
-        self.quick_fields = []
-        for idx in range(4):
-            entry = Gtk.Entry()
-            entry.set_placeholder_text(f'Campo {idx + 1}')
-            self.quick_fields.append(entry)
-            box.append(entry)
-        self.quick_kind.connect('notify::selected', self._quick_kind_changed)
-        for entry in (self.quick_label, self.quick_visual_text, self.quick_image, *self.quick_fields):
-            entry.connect('changed', self._quick_changed)
-        self.quick_state = _label('Aguardando seleção…', wrap=True)
-        box.append(self.quick_state)
         self.quick_picture = Gtk.Picture()
         self.quick_picture.set_size_request(100, 100)
         self.quick_picture.set_content_fit(Gtk.ContentFit.CONTAIN)
-        box.append(self.quick_picture)
-        self._build_composition_canvas(box)
+        image_box.append(self.quick_picture)
 
-        btns = _box(False, 6)
-        box.append(btns)
-        self.quick_preview_btn = _button(btns, 'Pré-visualizar (local)', self._quick_preview)
-        self.quick_save_btn = _button(btns, 'Salvar YAML com backup', self._quick_save)
-        self.quick_apply_btn = _button(btns, 'Aplicar ao dispositivo (IPC)', self._quick_apply)
-        _button(btns, 'Descartar edição / recarregar', self._quick_discard)
-        _button(box, 'Editor avançado de aparência…', self._edit_selected_key)
-        box.append(_label('Salvar não aplica automaticamente. Nenhum clique aqui executa ações. '
-                          'Fontes e deslocamentos são renderizados localmente antes de salvar.',
-                          style='caption', wrap=True))
+        # Aba Texto: rótulo, texto no LCD, tipografia, cores e alinhamento.
+        text_box.append(_label('Rótulo'))
+        self.quick_label = Gtk.Entry()
+        text_box.append(self.quick_label)
+        text_box.append(_label('Texto visual no LCD (opcional)'))
+        self.quick_visual_text = Gtk.Entry()
+        self.quick_visual_text.set_placeholder_text('Vazio: usa o rótulo da tecla')
+        text_box.append(self.quick_visual_text)
+        # Enquadramento e dimensões da imagem são movidos para Composição.
+        composition_box.append(_label('Posição, escala e enquadramento da imagem',
+                                      style='title-4'))
+        self._build_visual_style(text_box, composition_box)
+        self._build_composition_canvas(composition_box)
+
+        self.quick_kind.connect('notify::selected', self._quick_kind_changed)
+        for entry in (self.quick_label, self.quick_visual_text, self.quick_image, *self.quick_fields):
+            entry.connect('changed', self._quick_changed)
+
+        # Barra fixa de estado e comandos, fora dos ScrolledWindow das abas.
+        footer = _box(False, 6)
+        footer.add_css_class('toolbar')
+        props_scroll.append(Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL))
+        props_scroll.append(footer)
+        self.quick_state = _label('Aguardando seleção…', wrap=True)
+        footer.append(self.quick_state)
+        self.quick_preview_btn = _button(footer, 'Pré-visualizar (local)', self._quick_preview)
+        self.quick_save_btn = _button(footer, 'Salvar YAML com backup', self._quick_save)
+        self.quick_apply_btn = _button(footer, 'Aplicar ao dispositivo (IPC)', self._quick_apply)
+        _button(footer, 'Descartar edição / recarregar', self._quick_discard)
+        _button(footer, 'Editor avançado de aparência…', self._edit_selected_key)
+        footer.append(_label('Salvar não aplica automaticamente. Alterar aba não descarta edições.',
+                             style='caption', wrap=True))
         self._quick_kind_changed()
         self._quick_controls()
 
@@ -705,18 +750,19 @@ class StudioWindow(Adw.ApplicationWindow):
         self.style_pickers[name] = picker
         entry.connect('changed', self._color_entry_changed, name)
 
-    def _build_visual_style(self, parent):
-        expander = Gtk.Expander(label='Aparência visual — fontes, cores e posição')
-        expander.set_expanded(False)
+    def _build_visual_style(self, parent, composition_parent=None):
+        expander = Gtk.Expander(label='Tipografia, cores e alinhamento')
+        expander.set_expanded(True)
         parent.append(expander)
         controls = _box(False, 8)
         controls.set_margin_top(8)
         controls.set_margin_bottom(10)
         expander.set_child(controls)
-        self.style_enabled = Gtk.CheckButton(label='Usar aparência personalizada')
-        controls.append(self.style_enabled)
+        # O controle geral style_enabled fica fixo acima das abas.
         self.style_options = _box(False, 7)
         controls.append(self.style_options)
+        self.style_image_options = _box(False, 7)
+        (composition_parent if composition_parent is not None else controls).append(self.style_image_options)
         self.style_colors = {}
         self.style_pickers = {}
         for name, title in (('background', 'Fundo'), ('text_color', 'Texto')):
@@ -730,9 +776,10 @@ class StudioWindow(Adw.ApplicationWindow):
             'image_fit': ('Imagem', ('Preencher', 'Conter', 'Esticar')),
         }
         for name, (title, captions) in labels.items():
-            self.style_options.append(_label(title))
+            dest = self.style_image_options if name == 'image_fit' else self.style_options
+            dest.append(_label(title))
             widget = Gtk.DropDown.new_from_strings(list(captions))
-            self.style_options.append(widget)
+            dest.append(widget)
             widget.connect('notify::selected', self._visual_style_changed)
             self.style_choices[name] = widget
         self.style_numbers = {}
@@ -743,18 +790,19 @@ class StudioWindow(Adw.ApplicationWindow):
                  'image_y': 'Imagem: posição Y (px)',
                  'image_scale': 'Imagem: tamanho (%)'}
         for name, (minimum, maximum) in {**INT_RANGES, **IMAGE_RANGES}.items():
-            self.style_options.append(_label(names[name]))
+            dest = self.style_image_options if name in IMAGE_RANGES else self.style_options
+            dest.append(_label(names[name]))
             spin = Gtk.SpinButton.new_with_range(minimum, maximum, 1)
             spin.set_numeric(True)
             spin.connect('value-changed', self._visual_style_changed)
-            self.style_options.append(spin)
+            dest.append(spin)
             self.style_numbers[name] = spin
         self.style_show_text = Gtk.CheckButton(label='Exibir texto sobre imagem/fundo')
         self.style_show_text.connect('toggled', self._visual_style_changed)
         self.style_options.append(self.style_show_text)
         self.style_enabled.connect('toggled', self._visual_style_changed)
-        controls.append(_label('Imagem: escala de 25% a 200%, posição X/Y de −100 a +100 px. '
-                               'Texto: deslocamento X/Y de −40 a +40 px.',
+        controls.append(_label('Texto: deslocamento X/Y de −40 a +40 px. '
+                               'Os controles de imagem ficam na aba Composição.',
                                wrap=True, style='caption'))
         controls.append(_label('A prévia é gerada automaticamente após a edição; '
                                'Salvar YAML e Aplicar IPC continuam separados.',
@@ -817,6 +865,7 @@ class StudioWindow(Adw.ApplicationWindow):
         active = (self._quick_loaded is not None and self.style_enabled.get_active()
                   and 'quick_save' not in self._busy)
         self.style_options.set_sensitive(active)
+        self.style_image_options.set_sensitive(active)
         self.style_enabled.set_sensitive(self._quick_loaded is not None and 'quick_save' not in self._busy)
 
     def _visual_style_changed(self, *_):
@@ -1570,6 +1619,21 @@ class StudioWindow(Adw.ApplicationWindow):
             self._call('obs')
         return True
 
+    def _panel_position_changed(self, paned, *_):
+        if self._closed or paned.get_position() < 1:
+            return
+        if self._panel_save_timer:
+            GLib.source_remove(self._panel_save_timer)
+        self._panel_save_timer = GLib.timeout_add(550, self._persist_panel_width)
+
+    def _persist_panel_width(self):
+        self._panel_save_timer = 0
+        try:
+            save_panel_width(self.editor_split.get_position())
+        except (OSError, ValueError) as exc:
+            self.top_status.set_text('Não foi possível salvar a largura do editor: ' + str(exc))
+        return False
+
     def _sidebar_position_changed(self, paned, *_):
         # Evita gravar o arquivo repetidamente durante o arraste.
         if self._closed or paned.get_position() < MIN_SIDEBAR_WIDTH:
@@ -1595,6 +1659,9 @@ class StudioWindow(Adw.ApplicationWindow):
         if self._sidebar_save_timer:
             GLib.source_remove(self._sidebar_save_timer)
             self._persist_sidebar_width()
+        if self._panel_save_timer:
+            GLib.source_remove(self._panel_save_timer)
+            self._persist_panel_width()
         self._closed = True
         if self._preview_timer:
             GLib.source_remove(self._preview_timer)
