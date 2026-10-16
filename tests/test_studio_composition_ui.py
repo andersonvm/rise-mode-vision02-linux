@@ -12,6 +12,8 @@ from types import SimpleNamespace
 import pytest
 
 from vision02.studio_composition import clamp_drag, grid_coordinate
+from vision02.studio_composition_v2 import (state_from_fields, anchors_for_target,
+    smart_snap, hit_image_handle, resize_image_scale)
 from vision02.studio_visual_style import INT_RANGES, IMAGE_RANGES
 
 SOURCE = (Path(__file__).resolve().parents[1] / 'apps' / 'vision02_studio.py').read_text()
@@ -22,7 +24,10 @@ WINDOW = next(node for node in TREE.body if isinstance(node, ast.ClassDef) and n
 def method(name):
     node = next(node for node in WINDOW.body if isinstance(node, ast.FunctionDef) and node.name == name)
     namespace = {'clamp_drag': clamp_drag, 'grid_coordinate': grid_coordinate,
-                 'INT_RANGES': INT_RANGES, 'IMAGE_RANGES': IMAGE_RANGES}
+                 'INT_RANGES': INT_RANGES, 'IMAGE_RANGES': IMAGE_RANGES,
+                 'state_from_fields': state_from_fields,
+                 'anchors_for_target': anchors_for_target, 'smart_snap': smart_snap,
+                 'hit_image_handle': hit_image_handle, 'resize_image_scale': resize_image_scale}
     module = ast.Module(body=[node], type_ignores=[])
     exec(compile(ast.fix_missing_locations(module), '<composition-gtk-callback>', 'exec'), namespace)
     return namespace[name]
@@ -68,6 +73,9 @@ class FakeArea:
     def get_height(self):
         return self.size
 
+    def queue_draw(self):
+        pass
+
 
 class FakeSelection:
     def __init__(self, idx):
@@ -78,7 +86,7 @@ class FakeSelection:
 
 
 def studio(target=0, style=False, loaded=True, size=240, snap=False):
-    return SimpleNamespace(
+    result = SimpleNamespace(
         _quick_loaded=object() if loaded else None,
         _busy=set(),
         style_enabled=FakeCheck(style),
@@ -88,7 +96,13 @@ def studio(target=0, style=False, loaded=True, size=240, snap=False):
         composition_status=FakeText(),
         style_numbers={name:FakeSpin() for name in {**INT_RANGES, **IMAGE_RANGES}},
         _composition_drag_start=(0,0),
+        _composition_before_drag=None,
+        _composition_drag_kind='move',
+        _composition_guide=(None,None),
+        _composition_zoom=1.0,
     )
+    result.style_numbers['image_scale'].set_value(100)
+    return result
 
 
 def test_picture_is_not_cairo_pixbuf_painting():

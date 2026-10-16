@@ -27,6 +27,11 @@ from vision02.studio_inline_edit import KINDS, HINTS, key_to_form
 from vision02.studio_icon_gallery import filtered_icons, icon_by_path
 from vision02.studio_visual_style import CHOICES, INT_RANGES, IMAGE_RANGES, COLORS, ui_appearance, validated_appearance, hex_from_rgb
 from vision02.studio_composition import clamp_drag, grid_coordinate
+from vision02.studio_composition_v2 import (
+    CompositionHistory, FIELDS, ZOOMS, state_from_fields, apply_state,
+    default_target, smart_snap, anchors_for_target, display_geometry,
+    hit_image_handle, visible_handle_position, resize_image_scale,
+)
 from vision02_studio_layout import (
     MIN_SIDEBAR_WIDTH, load_sidebar_width, save_sidebar_width,
 )
@@ -97,6 +102,12 @@ class StudioWindow(Adw.ApplicationWindow):
         self._style_color_syncing = False
         self._composition_pixbuf = None
         self._composition_drag_start = (0, 0)
+        self._composition_history = CompositionHistory()
+        self._composition_before_drag = None
+        self._composition_drag_kind = 'move'
+        self._composition_guide = (None, None)
+        self._composition_zoom = 1.0
+        self._composition_preview_path = None
         self._syncing = False
         self._sidebar_save_timer = 0
 
@@ -161,6 +172,9 @@ class StudioWindow(Adw.ApplicationWindow):
         self._timer = GLib.timeout_add_seconds(4, self._tick)
         self._preview_timer = GLib.timeout_add_seconds(2, self._preview_tick)
         self._activity_timer = GLib.timeout_add(650, self._activity_tick)
+        keyboard = Gtk.EventControllerKey.new()
+        keyboard.connect('key-pressed', self._composition_key_pressed)
+        self.add_controller(keyboard)
         self.connect('close-request', self._on_close)
 
     def _page(self, key, title, description):
@@ -218,6 +232,20 @@ class StudioWindow(Adw.ApplicationWindow):
                 background-color: #101723;
                 border: 2px solid #3584e4;
                 border-radius: 8px;
+            }
+            frame.vision02-resize-handle {
+                background-color: #1566bc;
+                border: 3px solid #ffffff;
+                border-radius: 7px;
+                box-shadow: 0 0 0 2px #101723;
+            }
+            frame.vision02-resize-handle:hover {
+                background-color: #3584e4;
+            }
+            frame.vision02-resize-handle label {
+                color: white;
+                font-weight: 900;
+                font-size: 20px;
             }
         """)
         Gtk.StyleContext.add_provider_for_display(
@@ -380,6 +408,20 @@ class StudioWindow(Adw.ApplicationWindow):
         column.append(self.composition_target)
         self.composition_grid = Gtk.CheckButton(label='Encaixar na grade de 5 pixels')
         column.append(self.composition_grid)
+        zoom_row = _box(True, 8)
+        column.append(zoom_row)
+        zoom_row.append(_label('Zoom da edição:'))
+        self.composition_zoom = Gtk.DropDown.new_from_strings(['100%', '150%', '200%'])
+        self.composition_zoom.connect('notify::selected', self._composition_zoom_changed)
+        zoom_row.append(self.composition_zoom)
+        tools = _box(True, 6)
+        column.append(tools)
+        self.composition_undo = _button(tools, 'Desfazer', self._composition_undo_action)
+        self.composition_redo = _button(tools, 'Refazer', self._composition_redo_action)
+        self.composition_reset = _button(column, 'Restaurar posição/tamanho do elemento', self._composition_reset_action)
+        column.append(_label('Ctrl+Z / Ctrl+Shift+Z fora dos campos de texto. '
+                             'Arraste a alça no canto inferior direito do ícone para redimensionar.',
+                             style='caption', wrap=True))
 
         # O Gtk.Picture é responsável por mostrar o PNG; o DrawingArea só
         # desenha guias transparentes. Isso evita uma tela vazia quando o
@@ -402,9 +444,33 @@ class StudioWindow(Adw.ApplicationWindow):
         self.composition_canvas.set_can_target(False)
         self.composition_canvas.set_draw_func(self._composition_draw)
         self.composition_surface.add_overlay(self.composition_canvas)
+        # Alça REAL de GTK, independente do DrawingArea. Em algumas sessões
+        # GTK/Wayland a camada Cairo das guias pode não ser mostrada; o frame
+        # interativo continua visível e recebe seu próprio evento de arrasto.
+        self.composition_resize_handle = Gtk.Frame()
+        self.composition_resize_handle.add_css_class('vision02-resize-handle')
+        self.composition_resize_handle.set_size_request(40, 40)
+        self.composition_resize_handle.set_halign(Gtk.Align.END)
+        self.composition_resize_handle.set_valign(Gtk.Align.END)
+        self.composition_resize_handle.set_margin_end(7)
+        self.composition_resize_handle.set_margin_bottom(7)
+        self.composition_resize_handle.set_tooltip_text('Arraste esta alça para redimensionar a imagem')
+        resize_label = Gtk.Label(label='↘')
+        resize_label.set_halign(Gtk.Align.CENTER)
+        resize_label.set_valign(Gtk.Align.CENTER)
+        self.composition_resize_handle.set_child(resize_label)
+        self.composition_surface.add_overlay(self.composition_resize_handle)
+        resize_drag = Gtk.GestureDrag.new()
+        resize_drag.connect('drag-begin', self._composition_resize_drag_begin)
+        resize_drag.connect('drag-update', self._composition_drag_update)
+        resize_drag.connect('drag-end', self._composition_drag_end)
+        self.composition_resize_handle.add_controller(resize_drag)
+        self.composition_target.connect('notify::selected', self._composition_target_changed)
+        self.composition_resize_handle.set_visible(False)
         gesture = Gtk.GestureDrag.new()
         gesture.connect('drag-begin', self._composition_drag_begin)
         gesture.connect('drag-update', self._composition_drag_update)
+        gesture.connect('drag-end', self._composition_drag_end)
         self.composition_surface.add_controller(gesture)
         self.composition_status = _label('Aguardando prévia local da tecla selecionada.',
                                          style='caption', wrap=True)
@@ -415,52 +481,208 @@ class StudioWindow(Adw.ApplicationWindow):
                              style='caption'))
 
     def _composition_draw(self, _area, cr, width, height):
-        # Camada TRANSPARENTE: Gtk.Picture apresenta a imagem abaixo das guias.
+        # Guias são uma camada transparente; nunca integram o JPEG/HID.
         extent = min(width, height)
-        origin_x, origin_y = (width - extent) / 2, (height - extent) / 2
-        cr.set_source_rgba(1.0, 1.0, 1.0, 0.32)
+        if extent <= 0:
+            return
+        cx, cy, unit = display_geometry(width, height, self._composition_zoom)
         cr.set_line_width(1)
-        for point in (25, 50, 75):
-            coordinate = point * extent / 100
-            cr.move_to(origin_x + coordinate, origin_y)
-            cr.line_to(origin_x + coordinate, origin_y + extent)
-            cr.move_to(origin_x, origin_y + coordinate)
-            cr.line_to(origin_x + extent, origin_y + coordinate)
+        cr.set_source_rgba(1.0, 1.0, 1.0, 0.30)
+        for value in (-50, -25, 25, 50):
+            pos = value * unit
+            cr.move_to(cx + pos, 0)
+            cr.line_to(cx + pos, height)
+            cr.move_to(0, cy + pos)
+            cr.line_to(width, cy + pos)
         cr.stroke()
+        cr.set_source_rgba(0.20, 0.70, 1.0, 0.85)
+        cr.set_line_width(1.4)
+        cr.move_to(cx, 0)
+        cr.line_to(cx, height)
+        cr.move_to(0, cy)
+        cr.line_to(width, cy)
+        cr.stroke()
+        # Guias inteligentes, realçadas apenas durante a operação ativa.
+        gx, gy = self._composition_guide
+        cr.set_source_rgba(0.95, 0.73, 0.25, 0.96)
+        cr.set_line_width(2.0)
+        if gx is not None:
+            cr.move_to(cx + gx*unit, 0)
+            cr.line_to(cx + gx*unit, height)
+        if gy is not None:
+            cr.move_to(0, cy + gy*unit)
+            cr.line_to(width, cy + gy*unit)
+        cr.stroke()
+        # A alça é um Gtk.Frame separado, não depende desta camada Cairo.
 
-    def _composition_drag_begin(self, *_):
+    def _composition_target_changed(self, *_):
+        self._composition_update_buttons()
+        self.composition_canvas.queue_draw()
+
+    def _composition_resize_drag_begin(self, gesture, _x, _y):
+        # O gesto origina-se na própria alça, não nas coordenadas da imagem:
+        # é redimensionamento SEMPRE, independentemente de zoom, recorte ou
+        # posição atual. Evita o hit-test no limite da superfície.
+        self._composition_drag_begin()
+        if self._composition_before_drag is None:
+            return
+        self._composition_drag_kind = 'resize'
+        self.composition_status.set_text('Redimensionando imagem pela alça ↘…')
+        gesture.set_state(Gtk.EventSequenceState.CLAIMED)
+
+    def _composition_drag_begin(self, _gesture=None, x=0, y=0):
+        self._composition_before_drag = None
         if self._quick_loaded is None or 'quick_save' in self._busy:
             self.composition_status.set_text('Selecione uma tecla e aguarde suas propriedades.')
             return
         if not self.style_enabled.get_active():
-            # Não descartar um gesto porque a seção Aparência está recolhida.
-            # A alteração é apenas local até Salvar YAML / Aplicar IPC.
             self.style_enabled.set_active(True)
+        self._composition_before_drag = state_from_fields(self.style_numbers)
         target = ('image_x', 'image_y') if self.composition_target.get_selected() == 0 else ('offset_x', 'offset_y')
         self._composition_drag_start = tuple(int(self.style_numbers[field].get_value()) for field in target)
-        self.composition_status.set_text('Arrastando ' + ('imagem' if target[0] == 'image_x' else 'texto') + '…')
+        self._composition_drag_kind = 'move'
+        self._composition_guide = (None, None)
+        if target[0] == 'image_x':
+            area = self.composition_canvas
+            w, h = area.get_width(), area.get_height()
+            if w > 0 and h > 0 and hit_image_handle(x, y, w, h,
+                 int(self.style_numbers['image_x'].get_value()),
+                 int(self.style_numbers['image_y'].get_value()),
+                 int(self.style_numbers['image_scale'].get_value()), self._composition_zoom):
+                self._composition_drag_kind = 'resize'
+        self.composition_status.set_text('Redimensionando imagem…' if self._composition_drag_kind == 'resize'
+            else 'Arrastando ' + ('imagem' if target[0] == 'image_x' else 'texto') + '…')
 
     def _composition_drag_update(self, _gesture, offset_x, offset_y):
-        if self._quick_loaded is None or 'quick_save' in self._busy or not self.style_enabled.get_active():
+        if (self._quick_loaded is None or 'quick_save' in self._busy
+                or not self.style_enabled.get_active() or self._composition_before_drag is None):
             return
         target = ('image_x', 'image_y') if self.composition_target.get_selected() == 0 else ('offset_x', 'offset_y')
         extent = min(self.composition_canvas.get_width(), self.composition_canvas.get_height())
         if extent <= 0:
             self.composition_status.set_text('Área de composição indisponível; amplie a janela.')
             return
+        unit = extent / 100 * self._composition_zoom
+        if self._composition_drag_kind == 'resize':
+            previous = self._composition_before_drag[2]
+            scale = resize_image_scale(previous, offset_x, offset_y, unit)
+            self.style_numbers['image_scale'].set_value(scale)
+            self.composition_status.set_text(f'Imagem: tamanho {scale}% — prévia sendo atualizada.')
+            self.composition_canvas.queue_draw()
+            return
         snap = bool(self.composition_grid.get_active())
         result = []
+        guides = []
+        anchor_target = 'image' if target[0] == 'image_x' else 'text'
+        anchors = anchors_for_target(anchor_target, int(self.style_numbers['image_scale'].get_value()))
         for index, (field, diff) in enumerate(zip(target, (offset_x, offset_y))):
             lower, upper = ({**INT_RANGES, **IMAGE_RANGES})[field]
-            value = clamp_drag(self._composition_drag_start[index], diff, extent / 100, lower, upper)
+            value = clamp_drag(self._composition_drag_start[index], diff, unit, lower, upper)
             if snap:
                 value = grid_coordinate(value, lower, upper)
+            else:
+                value, guide = smart_snap(value, lower, upper, anchors)
+            guide = value if value in anchors else None
             self.style_numbers[field].set_value(value)
             result.append(value)
+            guides.append(guide)
+        self._composition_guide = tuple(guides)
+        self.composition_canvas.queue_draw()
         self.composition_status.set_text(
             ('Imagem' if target[0] == 'image_x' else 'Texto') +
             f': X={result[0]} px, Y={result[1]} px — prévia sendo atualizada.'
         )
+
+    def _composition_drag_end(self, *_):
+        if self._composition_before_drag is not None:
+            self._composition_history.record(self._composition_before_drag,
+                                             state_from_fields(self.style_numbers))
+        self._composition_before_drag = None
+        self._composition_guide = (None, None)
+        self.composition_canvas.queue_draw()
+        self._composition_update_buttons()
+
+    def _composition_update_buttons(self):
+        ready = self._quick_loaded is not None and 'quick_save' not in self._busy
+        self.composition_undo.set_sensitive(ready and bool(self._composition_history.undo_stack))
+        self.composition_redo.set_sensitive(ready and bool(self._composition_history.redo_stack))
+        self.composition_reset.set_sensitive(ready)
+        # Alça só aparece para uma tecla carregada no modo Imagem.
+        self.composition_resize_handle.set_visible(
+            ready and self.composition_target.get_selected() == 0
+        )
+
+    def _composition_restore_state(self, state, message):
+        if self._quick_loaded is None or 'quick_save' in self._busy:
+            return
+        if not self.style_enabled.get_active():
+            self.style_enabled.set_active(True)
+        apply_state(self.style_numbers, state)
+        self._composition_guide = (None, None)
+        self.composition_canvas.queue_draw()
+        self.composition_status.set_text(message)
+        self._composition_update_buttons()
+
+    def _composition_undo_action(self, *_):
+        if self._quick_loaded is None or 'quick_save' in self._busy:
+            return
+        state = self._composition_history.undo(state_from_fields(self.style_numbers))
+        if state is not None:
+            self._composition_restore_state(state, 'Composição: alteração desfeita.')
+
+    def _composition_redo_action(self, *_):
+        if self._quick_loaded is None or 'quick_save' in self._busy:
+            return
+        state = self._composition_history.redo(state_from_fields(self.style_numbers))
+        if state is not None:
+            self._composition_restore_state(state, 'Composição: alteração refeita.')
+
+    def _composition_reset_action(self, *_):
+        if self._quick_loaded is None or 'quick_save' in self._busy:
+            return
+        before = state_from_fields(self.style_numbers)
+        target = 'image' if self.composition_target.get_selected() == 0 else 'text'
+        after = default_target(before, target)
+        if self._composition_history.record(before, after):
+            self._composition_restore_state(after, 'Posição padrão restaurada (' + target + ').')
+
+    def _composition_key_pressed(self, _controller, keyval, _keycode, state):
+        if (self.stack.get_visible_child_name() != 'keys' or self._quick_loaded is None
+                or not state & Gdk.ModifierType.CONTROL_MASK):
+            return False
+        # Não interceptar Ctrl+Z dos campos editáveis (rótulo, YAML, URL etc.).
+        focus = self.get_focus()
+        if isinstance(focus, (Gtk.Entry, Gtk.TextView, Gtk.SpinButton)):
+            return False
+        if keyval not in (Gdk.KEY_z, Gdk.KEY_Z):
+            return False
+        if state & Gdk.ModifierType.SHIFT_MASK:
+            self._composition_redo_action()
+        else:
+            self._composition_undo_action()
+        return True
+
+    def _composition_zoom_changed(self, *_):
+        self._composition_zoom = ZOOMS[self.composition_zoom.get_selected()]
+        self._composition_update_zoom()
+        self.composition_canvas.queue_draw()
+
+    def _composition_update_zoom(self):
+        # Zoom é local ao GTK. Não modifica imagem persistida nem renderizador.
+        source = self._composition_pixbuf
+        if source is None:
+            return
+        if self._composition_zoom == 1.0:
+            if self._composition_preview_path:
+                self.composition_picture.set_file(Gio.File.new_for_path(self._composition_preview_path))
+            return
+        width, height = source.get_width(), source.get_height()
+        zoom = self._composition_zoom
+        scaled = source.scale_simple(round(width*zoom), round(height*zoom), GdkPixbuf.InterpType.BILINEAR)
+        x = (scaled.get_width() - width)//2
+        y = (scaled.get_height() - height)//2
+        crop = GdkPixbuf.Pixbuf.new_subpixbuf(scaled, x, y, width, height)
+        self.composition_picture.set_paintable(Gdk.Texture.new_for_pixbuf(crop))
 
     def _style_color_field(self, parent, title, name):
         row = _box(True, 6)
@@ -621,6 +843,7 @@ class StudioWindow(Adw.ApplicationWindow):
         self.quick_save_btn.set_sensitive(loaded and not busy)
         self.quick_apply_btn.set_sensitive(loaded and self._quick_saved and not self._quick_dirty and not busy)
         self._update_style_sensitivity()
+        self._composition_update_buttons()
         self.quick_icon_flow.set_sensitive(loaded and 'quick_save' not in self._busy)
         self.quick_import_icon_btn.set_sensitive('import_icon' not in self._busy and 'quick_save' not in self._busy)
 
@@ -662,6 +885,11 @@ class StudioWindow(Adw.ApplicationWindow):
             return
         self._quick_loaded = None
         self._quick_saved = False
+        self._composition_history.clear()
+        self._composition_before_drag = None
+        self._composition_guide = (None, None)
+        self._composition_preview_path = None
+        self._composition_update_buttons()
         self._composition_pixbuf = None
         self.composition_picture.set_paintable(None)
         self.composition_canvas.queue_draw()
@@ -810,6 +1038,8 @@ class StudioWindow(Adw.ApplicationWindow):
                 self._quick_updating = False
             self._quick_dirty = False
             self._quick_saved = False
+            self._composition_history.clear()
+            self._composition_update_buttons()
             self.quick_state.set_text('Pronta para editar. Alterações só são salvas ao clicar em Salvar YAML.')
             # Prévia local automática ao selecionar a tecla, não exige
             # clicar em um botão oculto na parte inferior do painel.
@@ -833,6 +1063,8 @@ class StudioWindow(Adw.ApplicationWindow):
                     picture_file = Gio.File.new_for_path(response['image'])
                     self.quick_picture.set_file(picture_file)
                     self.composition_picture.set_file(picture_file)
+                    self._composition_preview_path = response['image']
+                    self._composition_update_zoom()
                     self.composition_canvas.queue_draw()
                     self.composition_status.set_text('Prévia local pronta: arraste dentro da borda azul.')
                     self.quick_state.set_text('Pré-visualização local pronta; não alterou o dispositivo.')
