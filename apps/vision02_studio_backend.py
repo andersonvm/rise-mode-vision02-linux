@@ -50,7 +50,9 @@ def run(command: str, body: dict | None = None, *, project: Path = ROOT) -> dict
         if command == 'quick_preview':
             result = preview_key(project, name, key_id, edited, expected)
             return {'ok': True, 'profile': name, 'key_id': key_id,
-                    'image': result['previews'][str(key_id)]['image']}
+                    'image': result['previews'][str(key_id)]['image'],
+                    'layers': result.get('layers', {}),
+                    'components': result.get('components', {})}
         return {'ok': True, 'profile': name, 'key_id': key_id,
                 **save_key(project, name, key_id, edited, expected)}
     if command == 'status':

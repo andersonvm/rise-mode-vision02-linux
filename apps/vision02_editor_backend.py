@@ -25,6 +25,7 @@ from vision02.profiles.loader import parse_appearance
 from vision02.icon_library import list_icons, import_icon
 from vision02.user_profiles import default_profile_paths
 from vision02.rendering import render_profile, render_key
+from vision02.studio_preview_layers_v7 import render_preview_views, render_rgba_components
 from vision02.protocol import physical_key_to_display_id
 
 DEFAULT_PROFILES = (
@@ -223,7 +224,27 @@ def preview_key(project: Path, name: str, key_id: int, edited: dict,
                 "image": str(target),
                 "display_id": physical_key_to_display_id(physical),
             }
-        return {"ok": True, "previews": previews}
+        # Variantes locais SOMENTE da tecla em edição e SOMENTE da aparência
+        # personalizada. Os 15 PNGs tradicionais permanecem intactos.
+        layers = {}
+        selected = profile.keys.get(key_id)
+        if selected is not None and selected.appearance is not None:
+            for mode, picture in render_preview_views(
+                selected.label, selected.image, selected.appearance
+            ).items():
+                target = folder / f"tecla-{key_id:02d}-v7-{mode}.png"
+                picture.save(target, format="PNG")
+                layers[mode] = str(target)
+        components = {}
+        if selected is not None and selected.appearance is not None:
+            for name, picture in render_rgba_components(
+                selected.label, selected.image, selected.appearance
+            ).items():
+                target = folder / f"tecla-{key_id:02d}-v7-rgba-{name}.png"
+                picture.save(target, format="PNG")
+                components[name] = str(target)
+        return {"ok": True, "previews": previews, "layers": layers,
+                "components": components}
     finally:
         temp.unlink(missing_ok=True)
 

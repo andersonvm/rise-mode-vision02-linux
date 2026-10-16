@@ -119,6 +119,8 @@ class StudioWindow(Adw.ApplicationWindow):
         self._composition_last_overlap = None
         self._composition_v6_locked = {'image': False, 'text': False}
         self._composition_v6_outlines = {'image': True, 'text': True}
+        self._composition_v7_paths = {}  # quatro variantes locais RGB
+        self._composition_v7_visible = {'image': True, 'text': True}
         self._syncing = False
         self._sidebar_save_timer = 0
         self._panel_save_timer = 0
@@ -500,8 +502,22 @@ class StudioWindow(Adw.ApplicationWindow):
             row.append(outline)
             self.composition_v6_outline_checks[layer] = outline
         layers_box.append(_label(
-            'Mostrar moldura controla apenas os contornos do editor: o PNG '
-            'composto e os pixels no LCD permanecem visíveis.',
+            'Mostrar moldura controla apenas os contornos do editor.',
+            style='caption', wrap=True,
+        ))
+        # v7: visibilidade REAL dos pixels do preview, sem alterar o YAML.
+        self.composition_v7_visibility_checks = {}
+        for layer, title in (('image', 'Imagem'), ('text', 'Texto')):
+            check = Gtk.CheckButton(label='Exibir pixels da ' + title + ' (prévia)')
+            check.set_active(True)
+            check.set_sensitive(False)
+            check.connect('toggled', self._composition_v7_visibility_changed, layer)
+            layers_box.append(check)
+            self.composition_v7_visibility_checks[layer] = check
+        layers_box.append(_label(
+            'Os controles v7 mostram/ocultam pixels apenas na Composição. '
+            'A prévia da aba Imagem, o YAML e o LCD continuam inalterados. '
+            'Para teclas legadas sem aparência personalizada, use a prévia original.',
             style='caption', wrap=True,
         ))
         center_row = _box(True, 6)
@@ -839,6 +855,44 @@ class StudioWindow(Adw.ApplicationWindow):
             self._composition_update_layer_panel()
             return False
         return self._composition_select_layer(next_layer)
+
+    def _composition_v7_visibility_changed(self, check, layer):
+        # Estado exclusivo do preview. Não marca edição pendente.
+        self._composition_v7_visible[layer] = bool(check.get_active())
+        self._composition_v7_update_picture()
+
+    def _composition_v7_update_picture(self):
+        if not getattr(self, '_composition_v7_paths', None):
+            return False
+        show_image = self._composition_v7_visible['image']
+        show_text = self._composition_v7_visible['text']
+        mode = ('both' if show_image and show_text else
+                'image' if show_image else 'text' if show_text else 'none')
+        path = self._composition_v7_paths.get(mode)
+        if not path:
+            return False
+        try:
+            pixbuf = GdkPixbuf.Pixbuf.new_from_file(path)
+        except (GLib.Error, OSError) as exc:
+            self.composition_status.set_text('Não foi possível abrir prévia de camada: ' + str(exc))
+            return False
+        self._composition_pixbuf = pixbuf
+        self._composition_preview_path = path
+        self._composition_update_zoom()
+        self.composition_canvas.queue_draw()
+        return True
+
+    def _composition_v7_set_paths(self, paths):
+        self._composition_v7_paths = (
+            dict(paths) if isinstance(paths, dict) and
+            all(isinstance(paths.get(mode), str)
+                for mode in ('both', 'image', 'text', 'none')) else {}
+        )
+        enabled = bool(self._composition_v7_paths)
+        for layer in ('image', 'text'):
+            self.composition_v7_visibility_checks[layer].set_sensitive(enabled)
+        if enabled:
+            self._composition_v7_update_picture()
 
     def _composition_v6_is_locked(self, layer):
         return is_layer_locked(self._composition_v6_locked, layer)
@@ -1403,6 +1457,12 @@ class StudioWindow(Adw.ApplicationWindow):
             return
         if hasattr(self, '_composition_v6_reset_local'):
             self._composition_v6_reset_local()
+        self._composition_v7_paths = {}
+        for layer in ('image', 'text'):
+            self._composition_v7_visible[layer] = True
+            check = self.composition_v7_visibility_checks[layer]
+            check.set_active(True)
+            check.set_sensitive(False)
         self._quick_loaded = None
         self._quick_saved = False
         self._composition_history.clear()
@@ -1586,6 +1646,7 @@ class StudioWindow(Adw.ApplicationWindow):
                     self.composition_picture.set_file(picture_file)
                     self._composition_preview_path = response['image']
                     self._composition_update_zoom()
+                    self._composition_v7_set_paths(response.get('layers', {}))
                     self.composition_canvas.queue_draw()
                     self.composition_status.set_text('Prévia local pronta: arraste dentro da borda azul.')
                     self.quick_state.set_text('Pré-visualização local pronta; não alterou o dispositivo.')
