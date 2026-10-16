@@ -33,6 +33,7 @@ from vision02.studio_composition_v4 import nudge_state, guides_at_position, coor
 from vision02.studio_layers_v5 import (
     available_layers, hit_layer_candidates, next_overlapping_layer,
 )
+from vision02.studio_layers_v6 import center_layer_axis, is_layer_locked
 from vision02.studio_composition_v2 import (
     CompositionHistory, FIELDS, ZOOMS, state_from_fields, apply_state,
     default_target, smart_snap, anchors_for_target, display_geometry,
@@ -116,6 +117,8 @@ class StudioWindow(Adw.ApplicationWindow):
         self._composition_zoom = 1.0
         self._composition_preview_path = None
         self._composition_last_overlap = None
+        self._composition_v6_locked = {'image': False, 'text': False}
+        self._composition_v6_outlines = {'image': True, 'text': True}
         self._syncing = False
         self._sidebar_save_timer = 0
         self._panel_save_timer = 0
@@ -479,6 +482,42 @@ class StudioWindow(Adw.ApplicationWindow):
                              lambda _button, layer=layer: self._composition_select_layer(layer))
             button.set_tooltip_text('Selecionar camada ' + title + ' para editar na Composição')
             self.composition_layer_buttons[layer] = button
+        # Controles v6: estado SOMENTE da sessão GTK; não faz parte do YAML.
+        layer_controls = _box(False, 4)
+        layers_box.append(layer_controls)
+        self.composition_v6_lock_checks = {}
+        self.composition_v6_outline_checks = {}
+        for layer, title in (('image', 'Imagem'), ('text', 'Texto')):
+            row = _box(True, 8)
+            layer_controls.append(row)
+            lock = Gtk.CheckButton(label='Bloquear ' + title)
+            lock.connect('toggled', self._composition_v6_lock_changed, layer)
+            row.append(lock)
+            self.composition_v6_lock_checks[layer] = lock
+            outline = Gtk.CheckButton(label='Mostrar moldura ' + title)
+            outline.set_active(True)
+            outline.connect('toggled', self._composition_v6_outline_changed, layer)
+            row.append(outline)
+            self.composition_v6_outline_checks[layer] = outline
+        layers_box.append(_label(
+            'Mostrar moldura controla apenas os contornos do editor: o PNG '
+            'composto e os pixels no LCD permanecem visíveis.',
+            style='caption', wrap=True,
+        ))
+        center_row = _box(True, 6)
+        layers_box.append(center_row)
+        self.composition_v6_center_buttons = {}
+        for axis, title in (('x', 'Centralizar X'), ('y', 'Centralizar Y')):
+            self.composition_v6_center_buttons[axis] = _button(
+                center_row, title,
+                lambda _button, axis=axis: self._composition_v6_center(axis),
+            )
+        layers_box.append(_label(
+            'Centralização usa caixa geométrica aproximada. Restaurar posição/tamanho '
+            'usa o histórico existente. Bloqueio impede novos arrastes, ajustes finos '
+            'e restaurações, mas permite desfazer/refazer operações anteriores.',
+            style='caption', wrap=True,
+        ))
         self.composition_layers_status = _label('Nenhuma tecla carregada.', style='caption')
         layers_box.append(self.composition_layers_status)
         self.composition_cycle_overlap = _button(
@@ -653,12 +692,13 @@ class StudioWindow(Adw.ApplicationWindow):
                 vertical=CHOICES['vertical'][self.style_choices['vertical'].get_selected()],
             )
             target = 'image' if self.composition_target.get_selected() == 0 else 'text'
-            region = regions.get(target)
+            outlines = getattr(self, '_composition_v6_outlines', {'image': True, 'text': True})
+            region = regions.get(target) if outlines.get(target, True) else None
             # Pistas discretas das camadas não selecionadas. São apenas linhas
             # no overlay local; as duas chamadas rectangle() do alvo ativo
             # permanecem idênticas para preservar a renderização legada.
             for other, other_region in regions.items():
-                if other == target:
+                if other == target or not outlines.get(other, True):
                     continue
                 left, top = other_region.x, other_region.y
                 right, bottom = left + other_region.width, top + other_region.height
@@ -735,12 +775,30 @@ class StudioWindow(Adw.ApplicationWindow):
                 button.remove_css_class('suggested-action')
         title = {'image': 'Imagem', 'text': 'Texto'}
         text = ', '.join(title[key] for key in layers) if layers else 'nenhuma'
-        self.composition_layers_status.set_text('Camadas disponíveis: ' + text)
+        summary = 'Camadas disponíveis: ' + text
+        if hasattr(self, '_composition_v6_locked'):
+            indicators = []
+            for key in layers:
+                if self._composition_v6_locked.get(key, False):
+                    indicators.append(title[key] + ': bloqueada')
+                if not self._composition_v6_outlines.get(key, True):
+                    indicators.append(title[key] + ': moldura oculta')
+            if indicators:
+                summary += ' | ' + ', '.join(indicators)
+        self.composition_layers_status.set_text(summary)
         can_cycle = False
         if active and self._composition_last_overlap is not None:
             x, y = self._composition_last_overlap
             can_cycle = len(hit_layer_candidates(self._composition_layer_regions(), x, y)) == 2
         self.composition_cycle_overlap.set_sensitive(can_cycle)
+        if hasattr(self, 'composition_v6_lock_checks'):
+            for layer in ('image', 'text'):
+                self.composition_v6_lock_checks[layer].set_sensitive(active and layer in layers)
+                self.composition_v6_outline_checks[layer].set_sensitive(active and layer in layers)
+            locked = getattr(self, '_composition_v6_locked', {})
+            blocked = is_layer_locked(locked, target)
+            for button in self.composition_v6_center_buttons.values():
+                button.set_sensitive(active and target in layers and not blocked)
 
     def _composition_select_layer(self, layer):
         # A camada é somente um alvo de edição: NÃO modifica o formulário,
@@ -782,6 +840,54 @@ class StudioWindow(Adw.ApplicationWindow):
             return False
         return self._composition_select_layer(next_layer)
 
+    def _composition_v6_is_locked(self, layer):
+        return is_layer_locked(self._composition_v6_locked, layer)
+
+    def _composition_v6_lock_changed(self, check, layer):
+        self._composition_v6_locked[layer] = bool(check.get_active())
+        if self._composition_v6_locked[layer] and self._composition_before_drag is not None:
+            # Proteção adicional: interrompe operações em andamento.
+            self._composition_drag_end()
+        self._composition_update_buttons()
+        self.composition_canvas.queue_draw()
+
+    def _composition_v6_outline_changed(self, check, layer):
+        self._composition_v6_outlines[layer] = bool(check.get_active())
+        self.composition_canvas.queue_draw()
+
+    def _composition_v6_reset_local(self):
+        # Chamada quando outra tecla começa a ser carregada. Bloqueios não
+        # devem sobreviver à troca de tecla/perfil.
+        self._composition_v6_locked = {'image': False, 'text': False}
+        self._composition_v6_outlines = {'image': True, 'text': True}
+        for layer in ('image', 'text'):
+            self.composition_v6_lock_checks[layer].set_active(False)
+            self.composition_v6_outline_checks[layer].set_active(True)
+        self._composition_update_buttons()
+
+    def _composition_v6_center(self, axis):
+        if self._quick_loaded is None or 'quick_save' in self._busy:
+            return False
+        layer = 'image' if self.composition_target.get_selected() == 0 else 'text'
+        if layer not in self._composition_available_layers() or self._composition_v6_is_locked(layer):
+            return False
+        field = ('image_' if layer == 'image' else 'offset_') + axis
+        bounds = ({**INT_RANGES, **IMAGE_RANGES})[field]
+        before = state_from_fields(self.style_numbers)
+        after = center_layer_axis(
+            before, layer, axis, bounds,
+            text=self.quick_visual_text.get_text() or self.quick_label.get_text(),
+            font_size=int(self.style_numbers['font_size'].get_value()),
+            horizontal=CHOICES['horizontal'][self.style_choices['horizontal'].get_selected()],
+            vertical=CHOICES['vertical'][self.style_choices['vertical'].get_selected()],
+        )
+        if not self._composition_history.record(before, after):
+            self.composition_status.set_text('Camada já centralizada neste eixo (aproximação).')
+            return False
+        self._composition_restore_state(after, coordinate_caption(after, layer) +
+                                        ' — centralização aproximada.')
+        return True
+
     def _composition_selection_priority_changed(self, *_):
         # Apenas hit-test local; não modifica o perfil nem o estado dirty.
         self.composition_canvas.queue_draw()
@@ -803,6 +909,8 @@ class StudioWindow(Adw.ApplicationWindow):
         if self._quick_loaded is None or 'quick_save' in self._busy:
             return False
         target = 'image' if self.composition_target.get_selected() == 0 else 'text'
+        if getattr(self, '_composition_v6_is_locked', lambda _layer: False)(target):
+            return False
         if step is None:
             step = (1, 5)[self.composition_nudge_step.get_selected()]
         field = 'image_x' if target == 'image' else 'offset_x'
@@ -869,6 +977,9 @@ class StudioWindow(Adw.ApplicationWindow):
         # O gesto origina-se na própria alça, não nas coordenadas da imagem:
         # é redimensionamento SEMPRE, independentemente de zoom, recorte ou
         # posição atual. Evita o hit-test no limite da superfície.
+        if getattr(self, '_composition_v6_is_locked', lambda _layer: False)('image'):
+            self._composition_before_drag = None
+            return
         self._composition_drag_begin()
         if self._composition_before_drag is None:
             return
@@ -887,6 +998,10 @@ class StudioWindow(Adw.ApplicationWindow):
         # usadas pela alça separada e pelos testes legados da composição.
         if _gesture is not None and self._composition_pick_target(x, y) is None:
             self.composition_status.set_text('Clique sobre a imagem ou o texto para selecionar.')
+            return
+        layer = 'image' if self.composition_target.get_selected() == 0 else 'text'
+        if getattr(self, '_composition_v6_is_locked', lambda _layer: False)(layer):
+            self.composition_status.set_text('Camada bloqueada: desbloqueie para arrastar.')
             return
         if not self.style_enabled.get_active():
             self.style_enabled.set_active(True)
@@ -913,6 +1028,9 @@ class StudioWindow(Adw.ApplicationWindow):
         if offset_x or offset_y:
             self._composition_drag_did_move = True
         target = ('image_x', 'image_y') if self.composition_target.get_selected() == 0 else ('offset_x', 'offset_y')
+        layer = 'image' if target[0] == 'image_x' else 'text'
+        if getattr(self, '_composition_v6_is_locked', lambda _layer: False)(layer):
+            return
         extent = min(self.composition_canvas.get_width(), self.composition_canvas.get_height())
         if extent <= 0:
             self.composition_status.set_text('Área de composição indisponível; amplie a janela.')
@@ -964,16 +1082,29 @@ class StudioWindow(Adw.ApplicationWindow):
         ready = self._quick_loaded is not None and 'quick_save' not in self._busy
         self.composition_undo.set_sensitive(ready and bool(self._composition_history.undo_stack))
         self.composition_redo.set_sensitive(ready and bool(self._composition_history.redo_stack))
-        self.composition_reset.set_sensitive(ready)
+        layer = 'image' if self.composition_target.get_selected() == 0 else 'text'
+        locked = getattr(self, '_composition_v6_is_locked', lambda _layer: False)(layer)
+        self.composition_reset.set_sensitive(ready and not locked)
         if hasattr(self, '_composition_update_layer_panel'):
             self._composition_update_layer_panel()
         if hasattr(self, 'composition_nudge_buttons'):
             for button in self.composition_nudge_buttons:
-                button.set_sensitive(ready)
-            self.composition_nudge_step.set_sensitive(ready)
+                button.set_sensitive(ready and not locked)
+            self.composition_nudge_step.set_sensitive(ready and not locked)
+        # O bloqueio v6 também protege os cinco campos numéricos de
+        # geometria, sem desabilitar cores, textos ou ações da tecla.
+        if hasattr(self, '_composition_v6_locked') and hasattr(self, 'style_numbers'):
+            for layer, fields in (
+                ('image', ('image_x', 'image_y', 'image_scale')),
+                ('text', ('offset_x', 'offset_y')),
+            ):
+                for field in fields:
+                    spin = self.style_numbers[field]
+                    if hasattr(spin, 'set_sensitive'):
+                        spin.set_sensitive(not self._composition_v6_is_locked(layer))
         # Alça só aparece para uma tecla carregada no modo Imagem.
         self.composition_resize_handle.set_visible(
-            ready and self.composition_target.get_selected() == 0
+            ready and self.composition_target.get_selected() == 0 and not locked
         )
 
     def _composition_restore_state(self, state, message):
@@ -1006,6 +1137,8 @@ class StudioWindow(Adw.ApplicationWindow):
             return
         before = state_from_fields(self.style_numbers)
         target = 'image' if self.composition_target.get_selected() == 0 else 'text'
+        if getattr(self, '_composition_v6_is_locked', lambda _layer: False)(target):
+            return
         after = default_target(before, target)
         if self._composition_history.record(before, after):
             self._composition_restore_state(after, 'Posição padrão restaurada (' + target + ').')
@@ -1268,6 +1401,8 @@ class StudioWindow(Adw.ApplicationWindow):
         if self._quick_dirty:
             self.quick_state.set_text('Há alterações não salvas. Salve ou descarte antes de trocar de tecla.')
             return
+        if hasattr(self, '_composition_v6_reset_local'):
+            self._composition_v6_reset_local()
         self._quick_loaded = None
         self._quick_saved = False
         self._composition_history.clear()
