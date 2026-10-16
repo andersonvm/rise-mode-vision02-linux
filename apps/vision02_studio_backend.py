@@ -28,6 +28,9 @@ from vision02.studio_presets_v10 import (
     export_preset, import_preset, preview_data,
 )
 from vision02_editor_backend import _resolve_profile, _validate_at_same_location, preview_appearance
+from vision02.studio_preset_gallery_v11 import (
+    gallery_items, update_metadata, duplicate_preset, remove_metadata,
+)
 
 
 def run(command: str, body: dict | None = None, *, project: Path = ROOT) -> dict:
@@ -75,6 +78,22 @@ def run(command: str, body: dict | None = None, *, project: Path = ROOT) -> dict
         return {'profile': name, **save_batch_appearance(
             project, name, body['source_key'], body['targets'], expected)}
     if command.startswith('preset_'):
+        if command == 'preset_gallery':
+            if body:
+                raise ValueError('Galeria não recebe argumentos')
+            return {'ok': True, 'items': gallery_items()}
+        if command == 'preset_gallery_favorite':
+            if set(body) != {'id', 'favorite'}:
+                raise ValueError('Informe preset e estado favorito')
+            return {'ok': True, **update_metadata(body['id'], favorite=body['favorite'])}
+        if command == 'preset_gallery_category':
+            if set(body) != {'id', 'category'}:
+                raise ValueError('Informe preset e categoria')
+            return {'ok': True, **update_metadata(body['id'], category=body['category'])}
+        if command == 'preset_gallery_duplicate':
+            if set(body) != {'id', 'name'}:
+                raise ValueError('Informe preset e nome da cópia')
+            return {'ok': True, **duplicate_preset(body['id'], body['name'])}
         if command == 'preset_list':
             if body:
                 raise ValueError('Listagem não recebe argumentos')
@@ -91,7 +110,9 @@ def run(command: str, body: dict | None = None, *, project: Path = ROOT) -> dict
         if command == 'preset_delete':
             if set(body) != {'id'}:
                 raise ValueError('Informe preset')
-            return {'ok': True, **delete_preset(body['id'])}
+            result = delete_preset(body['id'])
+            remove_metadata(body['id'])
+            return {'ok': True, **result}
         if command == 'preset_import':
             if set(body) != {'path'} or not isinstance(body['path'], str):
                 raise ValueError('Selecione o ZIP')
@@ -173,7 +194,9 @@ def main(argv=None):
                         choices=('status', 'switch', 'reload', 'previews', 'live_preview', 'key_activity', 'icons',
                                  'quick_inspect', 'quick_preview', 'quick_save', 'quick_batch_appearance',
                                  'import_icon', 'system', 'obs', 'preset_list', 'preset_create', 'preset_rename',
-                                 'preset_delete', 'preset_import', 'preset_export', 'preset_apply', 'preset_preview'))
+                                 'preset_delete', 'preset_import', 'preset_export', 'preset_apply', 'preset_preview',
+                                 'preset_gallery', 'preset_gallery_favorite', 'preset_gallery_category',
+                                 'preset_gallery_duplicate'))
     args = parser.parse_args(argv)
     try:
         payload = json.load(sys.stdin) if not sys.stdin.isatty() and not sys.stdin.closed else {}

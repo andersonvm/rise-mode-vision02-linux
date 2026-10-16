@@ -107,6 +107,7 @@ class StudioWindow(Adw.ApplicationWindow):
         self._quick_batch_configured = set()
         self._quick_batch_pending_apply = False
         self._preset_items = []
+        self._gallery_items = []
         self._preset_pending_apply = False
         self._icons = []
         self._quick_icon_buttons = {}
@@ -430,7 +431,7 @@ class StudioWindow(Adw.ApplicationWindow):
         batch_box.set_margin_top(10)
         batch_expander.set_child(batch_box)
         self._build_batch_appearance_v9(batch_box)
-        preset_expander = Gtk.Expander(label='Biblioteca de presets visuais (v10)')
+        preset_expander = Gtk.Expander(label='Biblioteca de presets visuais (v10) · galeria v11')
         image_box.append(preset_expander)
         preset_box = _box(False, 7)
         preset_box.set_margin_top(10)
@@ -543,7 +544,163 @@ class StudioWindow(Adw.ApplicationWindow):
         self.preset_status = _label('Nenhum preset modifica o dispositivo automaticamente.', wrap=True)
         parent.append(self.preset_status)
         self._preset_controls()
+        self._build_presets_v11(parent)
         self._call('preset_list')
+
+    def _build_presets_v11(self, parent):
+        parent.append(_label('Galeria v11 — escolha um cartão; favoritos e categorias ficam '
+                             'somente na biblioteca local.', wrap=True, style='caption'))
+        search_row = _box(True, 6)
+        parent.append(search_row)
+        self.gallery_search = Gtk.SearchEntry()
+        self.gallery_search.set_placeholder_text('Pesquisar nome ou categoria')
+        self.gallery_search.set_hexpand(True)
+        self.gallery_search.connect('search-changed', self._gallery_render)
+        search_row.append(self.gallery_search)
+        self.gallery_favorites_only = Gtk.CheckButton(label='Só favoritos')
+        self.gallery_favorites_only.connect('toggled', self._gallery_render)
+        search_row.append(self.gallery_favorites_only)
+        category_row = _box(True, 6)
+        parent.append(category_row)
+        category_row.append(_label('Filtrar categoria:', style='caption'))
+        self.gallery_category_filter = Gtk.DropDown.new_from_strings(['Todas as categorias'])
+        self.gallery_category_filter.connect('notify::selected', self._gallery_render)
+        category_row.append(self.gallery_category_filter)
+        gallery_scroll = Gtk.ScrolledWindow()
+        gallery_scroll.set_min_content_height(230)
+        gallery_scroll.set_max_content_height(360)
+        gallery_scroll.set_propagate_natural_height(False)
+        parent.append(gallery_scroll)
+        self.gallery_flow = Gtk.FlowBox()
+        self.gallery_flow.set_selection_mode(Gtk.SelectionMode.NONE)
+        self.gallery_flow.set_max_children_per_line(4)
+        self.gallery_flow.set_row_spacing(8)
+        self.gallery_flow.set_column_spacing(8)
+        gallery_scroll.set_child(self.gallery_flow)
+        self.gallery_count = _label('Carregando miniaturas…', style='caption')
+        parent.append(self.gallery_count)
+        favorite_row = _box(True, 6)
+        parent.append(favorite_row)
+        self.gallery_favorite_btn = _button(favorite_row, 'Marcar como favorito', self._gallery_favorite)
+        self.gallery_category_entry = Gtk.Entry()
+        self.gallery_category_entry.set_placeholder_text('Categoria (até 32 caracteres)')
+        self.gallery_category_entry.set_max_length(32)
+        self.gallery_category_entry.set_hexpand(True)
+        favorite_row.append(self.gallery_category_entry)
+        self.gallery_category_btn = _button(favorite_row, 'Salvar categoria', self._gallery_category)
+        duplicate_row = _box(True, 6)
+        parent.append(duplicate_row)
+        self.gallery_duplicate_name = Gtk.Entry()
+        self.gallery_duplicate_name.set_placeholder_text('Nome da cópia do preset')
+        self.gallery_duplicate_name.set_max_length(60)
+        self.gallery_duplicate_name.set_hexpand(True)
+        duplicate_row.append(self.gallery_duplicate_name)
+        self.gallery_duplicate_btn = _button(duplicate_row, 'Duplicar preset', self._gallery_duplicate)
+        self._gallery_update_selected()
+
+    def _gallery_item(self):
+        ident = self._preset_active()
+        return next((item for item in self._gallery_items if item['id'] == ident), None)
+
+    def _gallery_update_selected(self):
+        if not hasattr(self, 'gallery_favorite_btn'):
+            return
+        item = self._gallery_item()
+        busy = self._preset_busy()
+        selected = item is not None and not busy
+        self.gallery_favorite_btn.set_sensitive(selected)
+        self.gallery_category_btn.set_sensitive(selected)
+        self.gallery_duplicate_btn.set_sensitive(selected)
+        if item:
+            self.gallery_favorite_btn.set_label('Remover dos favoritos' if item['favorite'] else 'Marcar como favorito')
+            self.gallery_category_entry.set_text(item['category'])
+        else:
+            self.gallery_favorite_btn.set_label('Marcar como favorito')
+            self.gallery_category_entry.set_text('')
+
+    def _gallery_choose(self, _button, ident):
+        ids = [p['id'] for p in self._preset_items]
+        if ident not in ids:
+            return
+        # A seleção do cartão utiliza o DropDown v10; confirmação antiga é zerada.
+        self.preset_confirm.set_active(False)
+        self.preset_combo.set_selected(ids.index(ident))
+        item = self._gallery_item()
+        if item:
+            try:
+                self.preset_picture.set_file(Gio.File.new_for_path(item['thumbnail']))
+            except (GLib.Error, OSError):
+                self.preset_picture.set_paintable(None)
+        self._gallery_update_selected()
+
+    def _gallery_render(self, *_):
+        if not hasattr(self, 'gallery_flow'):
+            return
+        while (child := self.gallery_flow.get_first_child()) is not None:
+            self.gallery_flow.remove(child)
+        categories = getattr(self, '_gallery_categories', ['Todas as categorias'])
+        idx = self.gallery_category_filter.get_selected()
+        category = categories[idx] if 0 <= idx < len(categories) else 'Todas as categorias'
+        query = self.gallery_search.get_text().casefold().strip()
+        favorite_only = self.gallery_favorites_only.get_active()
+        visible = [item for item in self._gallery_items
+                   if (not query or query in item['name'].casefold()
+                       or query in item['category'].casefold())
+                   and (not favorite_only or item['favorite'])
+                   and (idx == 0 or item['category'] == category)]
+        for item in visible:
+            card = Gtk.Button()
+            card.set_tooltip_text(item['name'] + (' · ' + item['category'] if item['category'] else ''))
+            box = _box(False, 4)
+            pic = Gtk.Picture()
+            pic.set_size_request(100, 100)
+            pic.set_content_fit(Gtk.ContentFit.CONTAIN)
+            pic.set_file(Gio.File.new_for_path(item['thumbnail']))
+            box.append(pic)
+            title = Gtk.Label(label=('★ ' if item['favorite'] else '') + item['name'])
+            title.set_max_width_chars(17)
+            title.set_ellipsize(Pango.EllipsizeMode.END)
+            box.append(title)
+            if item['category']:
+                cat = Gtk.Label(label=item['category'])
+                cat.add_css_class('caption')
+                box.append(cat)
+            card.set_child(box)
+            card.connect('clicked', self._gallery_choose, item['id'])
+            self.gallery_flow.insert(card, -1)
+        self.gallery_count.set_text(f'{len(visible)} de {len(self._gallery_items)} presets exibidos.')
+
+    def _gallery_refresh(self, items):
+        self._gallery_items = items
+        previous = 'Todas as categorias'
+        selected = self.gallery_category_filter.get_selected()
+        if hasattr(self, '_gallery_categories') and 0 <= selected < len(self._gallery_categories):
+            previous = self._gallery_categories[selected]
+        categories = ['Todas as categorias'] + sorted({p['category'] for p in items if p['category']}, key=str.casefold)
+        self._gallery_categories = categories
+        self.gallery_category_filter.set_model(Gtk.StringList.new(categories))
+        self.gallery_category_filter.set_selected(categories.index(previous) if previous in categories else 0)
+        self._gallery_render()
+        self._gallery_update_selected()
+
+    def _gallery_favorite(self, *_):
+        item = self._gallery_item()
+        if item and not self._preset_busy():
+            self._call('preset_gallery_favorite', id=item['id'], favorite=not item['favorite'])
+
+    def _gallery_category(self, *_):
+        item = self._gallery_item()
+        if item and not self._preset_busy():
+            self._call('preset_gallery_category', id=item['id'], category=self.gallery_category_entry.get_text())
+
+    def _gallery_duplicate(self, *_):
+        item = self._gallery_item()
+        if item and not self._preset_busy():
+            name = self.gallery_duplicate_name.get_text().strip()
+            if not name:
+                self.preset_status.set_text('Informe um nome novo para duplicar o preset.')
+                return
+            self._call('preset_gallery_duplicate', id=item['id'], name=name)
 
     def _preset_active(self):
         index = self.preset_combo.get_selected()
@@ -554,6 +711,7 @@ class StudioWindow(Adw.ApplicationWindow):
         self.preset_confirm.set_active(False)
         self.preset_picture.set_paintable(None)
         self._preset_controls()
+        self._gallery_update_selected()
 
     def _preset_target_toggled(self, *_):
         self.preset_confirm.set_active(False)
@@ -562,7 +720,9 @@ class StudioWindow(Adw.ApplicationWindow):
     def _preset_busy(self):
         return any(cmd in self._busy for cmd in ('quick_save', 'quick_batch_appearance',
                    'quick_inspect', 'preset_apply', 'preset_create', 'preset_delete',
-                   'preset_rename', 'preset_import', 'preset_export'))
+                   'preset_rename', 'preset_import', 'preset_export', 'preset_gallery',
+                   'preset_gallery_favorite', 'preset_gallery_category',
+                   'preset_gallery_duplicate'))
 
     def _preset_controls(self, *_):
         if not hasattr(self, 'preset_apply_btn'):
@@ -587,6 +747,8 @@ class StudioWindow(Adw.ApplicationWindow):
         self.preset_confirm.set_sensitive(loaded and selected and targets)
         self.preset_apply_btn.set_sensitive(loaded and selected and targets
                                              and self.preset_confirm.get_active())
+        if hasattr(self, 'gallery_favorite_btn'):
+            self._gallery_update_selected()
 
     def _preset_create(self, *_):
         if not self._quick_loaded or self._quick_dirty or self._preset_busy():
@@ -664,6 +826,18 @@ class StudioWindow(Adw.ApplicationWindow):
                               'Exportar preset ZIP', 'Exportar')
 
     def _preset_received(self, command, response):
+        if command == 'preset_gallery':
+            self._gallery_refresh(response['items'])
+            return
+        if command in ('preset_gallery_favorite', 'preset_gallery_category'):
+            self.preset_status.set_text('Metadados da galeria atualizados.')
+            self._call('preset_gallery')
+            return
+        if command == 'preset_gallery_duplicate':
+            self.preset_status.set_text('Preset duplicado na biblioteca.')
+            self.gallery_duplicate_name.set_text('')
+            self._call('preset_list')
+            return
         if command == 'preset_list':
             old = self._preset_active()
             self._preset_items = response['presets']
@@ -673,6 +847,7 @@ class StudioWindow(Adw.ApplicationWindow):
             self.preset_combo.set_selected(ids.index(old) if old in ids else
                                             (0 if ids else Gtk.INVALID_LIST_POSITION))
             self.preset_status.set_text(f'{len(ids)} preset(s) na biblioteca.')
+            self._call('preset_gallery')
         elif command == 'preset_preview':
             if response['id'] == self._preset_active():
                 self.preset_picture.set_file(Gio.File.new_for_path(response['image']))
