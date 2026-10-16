@@ -21,6 +21,10 @@ gi.require_version('Gtk', '4.0')
 gi.require_version('Adw', '1')
 from gi.repository import Adw, Gio, GLib, Gtk, Pango
 
+from vision02_studio_layout import (
+    MIN_SIDEBAR_WIDTH, load_sidebar_width, save_sidebar_width,
+)
+
 TOOLS = {
     'teclas': 'vision02-editor',
     'perfis': 'vision02-profiles',
@@ -55,7 +59,8 @@ def _box(horizontal=False, spacing=10):
 class StudioWindow(Adw.ApplicationWindow):
     def __init__(self, app):
         super().__init__(application=app, title='Vision 02 Studio')
-        self.set_default_size(1120, 780)
+        self.set_default_size(1180, 780)
+        self.set_resizable(True)
         self.set_size_request(820, 560)
         self._closed = False
         self._busy = set()
@@ -66,6 +71,7 @@ class StudioWindow(Adw.ApplicationWindow):
         self._selected_key = 1
         self._icons = []
         self._syncing = False
+        self._sidebar_save_timer = 0
 
         toolbar = Adw.ToolbarView()
         header = Adw.HeaderBar()
@@ -78,25 +84,37 @@ class StudioWindow(Adw.ApplicationWindow):
         toolbar.add_top_bar(header)
         self.set_content(toolbar)
 
-        center = _box(True, 0)
-        toolbar.set_content(center)
+        # A divisória é controlada pelo usuário, não por uma largura fixa.
+        # O StackSidebar precisa preencher a altura para não ocultar páginas.
+        self.navigation = Gtk.Paned.new(Gtk.Orientation.HORIZONTAL)
+        self.navigation.set_wide_handle(True)
+        self.navigation.set_resize_start_child(False)
+        self.navigation.set_shrink_start_child(False)
+        self.navigation.set_resize_end_child(True)
+        self.navigation.set_shrink_end_child(False)
+        toolbar.set_content(self.navigation)
+
         self.stack = Gtk.Stack()
         self.stack.set_transition_type(Gtk.StackTransitionType.CROSSFADE)
         self.stack.set_hexpand(True)
         self.stack.set_vexpand(True)
         sidebar = Gtk.StackSidebar()
         sidebar.set_stack(self.stack)
-        sidebar.set_size_request(170, -1)
-        sidebar.set_valign(Gtk.Align.START)
+        sidebar.set_hexpand(True)
+        sidebar.set_vexpand(True)
+        sidebar.set_valign(Gtk.Align.FILL)
         side_frame = _box(False)
-        side_frame.set_size_request(190, -1)
+        side_frame.set_size_request(MIN_SIDEBAR_WIDTH, -1)
+        side_frame.set_vexpand(True)
         side_frame.set_margin_top(18)
-        side_frame.set_margin_start(12)
+        side_frame.set_margin_start(14)
+        side_frame.set_margin_end(12)
         side_frame.append(_label('VISION 02', style='title-3'))
         side_frame.append(sidebar)
-        center.append(side_frame)
-        center.append(Gtk.Separator(orientation=Gtk.Orientation.VERTICAL))
-        center.append(self.stack)
+        self.navigation.set_start_child(side_frame)
+        self.navigation.set_end_child(self.stack)
+        self.navigation.set_position(load_sidebar_width())
+        self.navigation.connect('notify::position', self._sidebar_position_changed)
 
         self._build_dashboard()
         self._build_keys()
@@ -485,7 +503,27 @@ class StudioWindow(Adw.ApplicationWindow):
             self._call('obs')
         return True
 
+    def _sidebar_position_changed(self, paned, *_):
+        # Evita gravar o arquivo repetidamente durante o arraste.
+        if self._closed or paned.get_position() < MIN_SIDEBAR_WIDTH:
+            return
+        if self._sidebar_save_timer:
+            GLib.source_remove(self._sidebar_save_timer)
+        self._sidebar_save_timer = GLib.timeout_add(600, self._persist_sidebar_width)
+
+    def _persist_sidebar_width(self):
+        self._sidebar_save_timer = 0
+        try:
+            save_sidebar_width(self.navigation.get_position())
+        except (OSError, ValueError) as exc:
+            # Preferência visual: nunca interromper a interface por erro de I/O.
+            print(f'Vision 02 Studio: não foi possível salvar largura: {exc}', file=sys.stderr)
+        return False
+
     def _on_close(self, *_):
+        if self._sidebar_save_timer:
+            GLib.source_remove(self._sidebar_save_timer)
+            self._persist_sidebar_width()
         self._closed = True
         if self._timer:
             GLib.source_remove(self._timer)
