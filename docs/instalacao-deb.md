@@ -4,20 +4,19 @@ O workflow **Build Ubuntu DEB** (`.github/workflows/build-deb.yml`) gera
 um `.deb` completo para Ubuntu 24.04 ou posterior. Ele executa primeiro os
 testes automatizados e então empacota o código, a interface e exemplos do Studio.
 
-## Baixar pelo GitHub Actions
+## Baixar pela página Releases (recomendado)
 
-1. Abra [Actions → Build Ubuntu DEB](https://github.com/andersonvm/rise-mode-vision02-linux/actions/workflows/build-deb.yml).
-2. Clique em **Run workflow**, selecione `main` e execute; ou use o artefato
-   de uma execução bem-sucedida na branch `main`.
-3. Baixe o artefato `vision02-studio-deb-*` e extraia o ZIP baixado pelo GitHub.
-4. Instale o `.deb` com duplo clique ou no terminal:
+1. Abra **[Releases — versão mais recente](https://github.com/andersonvm/rise-mode-vision02-linux/releases/latest)**.
+2. Em **Assets**, baixe `vision02-studio-desktop_15.0.0-1_all.deb` (ou a versão disponível) e `SHA256SUMS`.
+3. Abra um terminal na pasta dos downloads e verifique a integridade com `sha256sum -c SHA256SUMS`.
+4. Instale o pacote:
 
 ```bash
-sudo apt install ./vision02-studio-desktop_*.deb
+sudo apt install ./vision02-studio-desktop_*_all.deb
 ```
 
-O pacote instala o atalho **Vision 02 Studio** no menu do Ubuntu e o
-comando `vision02-studio-control` para conversar com o controlador via IPC:
+Isso instala o atalho **Vision 02 Studio** no menu do Ubuntu e o
+comando `vision02-studio-control`, que acessa o controlador via IPC:
 
 ```bash
 vision02-studio-control control status
@@ -25,8 +24,16 @@ vision02-studio-control control profiles
 ```
 
 O pacote **não exige** manter um clone Git ou uma `.venv` pessoal:
-os arquivos são instalados sob `/opt/vision02-studio/` e as dependências
+os arquivos ficam em `/opt/vision02-studio/` e as dependências
 GTK, Pillow, PyYAML e `dbus-next` são obtidas pelo `apt`.
+
+## Releases automáticas
+
+O workflow executa testes de regressão e **instala o pacote num runner Ubuntu 24.04 para validação** antes de publicá-lo.
+
+- Na primeira execução concluída com sucesso na `main`, cria a Release **v15.0.0** e anexa o `.deb` e o `SHA256SUMS`.
+- Ao enviar uma **nova** tag `vMAJOR.MINOR.PATCH`, cria uma Release correspondente, sem sobrescrever versões já publicadas.
+- Execuções normais na `main` continuam publicando artefatos temporários (30 dias) na [aba Actions](https://github.com/andersonvm/rise-mode-vision02-linux/actions/workflows/build-deb.yml), mas **não substituem o binário da Release v15.0.0**. Para distribuir uma alteração nova, incremente a versão e use uma tag nova.
 
 ## Serviço HID e atualizações
 
@@ -57,7 +64,13 @@ Os testes automatizados devem ser executados antes da distribuição.
 
 ## Publicação via tag
 
-Uma tag `v15.0.0` também aciona o workflow. Após os testes, o `.deb`
-e `SHA256SUMS` são anexados à **Release** daquela tag.
-Execuções manuais e pushes na `main` publicam somente um artefato
-temporário do GitHub Actions (retenção de 30 dias).
+Para publicar uma atualização futura, faça commit de todas as alterações,
+crie uma nova tag de versão no commit desejado e envie-a ao GitHub:
+
+```bash
+git tag v15.0.1
+git push origin v15.0.1
+```
+
+**Não reutilize tags de uma Release existente.** Verifique a execução dos testes,
+a instalação do pacote e os Assets antes de anunciar a versão.
