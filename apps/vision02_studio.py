@@ -33,6 +33,9 @@ from vision02.studio_alpha_hit_v8 import (
     extract_alpha, mask_candidates, choose_mask_layer, next_mask_layer, mask_regions,
 )
 from vision02.studio_composition_v4 import nudge_state, guides_at_position, coordinate_caption
+from vision02.studio_preset_canvas_v13 import (
+    canvas_regions, select_at, resize_hit, transform,
+)
 from vision02.studio_layers_v5 import (
     available_layers, hit_layer_candidates, next_overlapping_layer,
 )
@@ -114,6 +117,13 @@ class StudioWindow(Adw.ApplicationWindow):
         self._preset_editor_sync = False
         self._preset_editor_timer = 0
         self._preset_editor_preview_pending = False
+        self._preset_canvas_zoom = 1.0
+        self._preset_canvas_target = 'image'
+        self._preset_canvas_before_drag = None
+        self._preset_canvas_drag_kind = 'move'
+        self._preset_canvas_drag_updating = False
+        self._preset_canvas_guides = (None, None)
+        self._preset_canvas_preview_path = None
         self._preset_pending_apply = False
         self._icons = []
         self._quick_icon_buttons = {}
@@ -675,6 +685,7 @@ class StudioWindow(Adw.ApplicationWindow):
         self.preset_editor_picture.set_size_request(200, 200)
         self.preset_editor_picture.set_content_fit(Gtk.ContentFit.CONTAIN)
         box.append(self.preset_editor_picture)
+        self._build_preset_canvas_v13(box)
         row = _box(True, 6)
         box.append(row)
         self.preset_editor_save_btn = _button(row, 'Salvar alterações no preset', self._preset_editor_save)
@@ -686,6 +697,201 @@ class StudioWindow(Adw.ApplicationWindow):
         self.preset_editor_status = _label('Carregue um preset antes de editar.', wrap=True)
         box.append(self.preset_editor_status)
         self._preset_editor_controls()
+
+    # v13: canvas estritamente local; opera sobre widgets do rascunho v12.
+    def _build_preset_canvas_v13(self, parent):
+        expander = Gtk.Expander(label='Área de trabalho interativa (v13)')
+        expander.set_expanded(True)
+        parent.append(expander)
+        box = _box(False, 8)
+        expander.set_child(box)
+        box.append(_label('Clique na imagem ou no texto para selecionar; arraste para mover. '
+                          'A alça ↘ redimensiona a imagem. Nenhum movimento salva o preset.',
+                          wrap=True, style='caption'))
+        row = _box(True, 8)
+        box.append(row)
+        row.append(_label('Elemento:'))
+        self.preset_canvas_target = Gtk.DropDown.new_from_strings(['Imagem', 'Texto'])
+        self.preset_canvas_target.connect('notify::selected', self._preset_canvas_target_changed)
+        row.append(self.preset_canvas_target)
+        row.append(_label('Zoom:'))
+        self.preset_canvas_zoom = Gtk.DropDown.new_from_strings(['100%', '150%', '200%'])
+        self.preset_canvas_zoom.connect('notify::selected', self._preset_canvas_zoom_changed)
+        row.append(self.preset_canvas_zoom)
+        self.preset_canvas_snap = Gtk.CheckButton(label='Encaixe inteligente')
+        self.preset_canvas_snap.set_active(True)
+        box.append(self.preset_canvas_snap)
+        self.preset_canvas_surface = Gtk.Overlay()
+        self.preset_canvas_surface.set_size_request(320, 320)
+        self.preset_canvas_surface.set_hexpand(False)
+        self.preset_canvas_surface.set_halign(Gtk.Align.CENTER)
+        box.append(self.preset_canvas_surface)
+        self.preset_canvas_picture = Gtk.Picture()
+        self.preset_canvas_picture.set_size_request(320, 320)
+        self.preset_canvas_picture.set_content_fit(Gtk.ContentFit.CONTAIN)
+        self.preset_canvas_picture.set_can_target(False)
+        self.preset_canvas_surface.set_child(self.preset_canvas_picture)
+        self.preset_canvas_overlay = Gtk.DrawingArea()
+        self.preset_canvas_overlay.set_content_width(320)
+        self.preset_canvas_overlay.set_content_height(320)
+        self.preset_canvas_overlay.set_can_target(False)
+        self.preset_canvas_overlay.set_draw_func(self._preset_canvas_draw)
+        self.preset_canvas_surface.add_overlay(self.preset_canvas_overlay)
+        drag = Gtk.GestureDrag.new()
+        drag.set_button(1)
+        drag.connect('drag-begin', self._preset_canvas_drag_begin)
+        drag.connect('drag-update', self._preset_canvas_drag_update)
+        drag.connect('drag-end', self._preset_canvas_drag_end)
+        self.preset_canvas_surface.add_controller(drag)
+        self.preset_canvas_status = _label('Carregue um preset para editar visualmente.', wrap=True, style='caption')
+        box.append(self.preset_canvas_status)
+
+    def _preset_canvas_size(self):
+        return (self.preset_canvas_overlay.get_width(), self.preset_canvas_overlay.get_height())
+
+    def _preset_canvas_style(self):
+        return self._preset_editor_collect()['appearance']
+
+    def _preset_canvas_target_changed(self, *_):
+        self._preset_canvas_target = ('image' if self.preset_canvas_target.get_selected() == 0 else 'text')
+        self.preset_canvas_overlay.queue_draw()
+
+    def _preset_canvas_zoom_changed(self, *_):
+        self._preset_canvas_zoom = ZOOMS[self.preset_canvas_zoom.get_selected()]
+        self._preset_canvas_render_image()
+        self.preset_canvas_overlay.queue_draw()
+
+    def _preset_canvas_render_image(self):
+        path = self._preset_canvas_preview_path
+        if not path:
+            self.preset_canvas_picture.set_paintable(None)
+            return
+        try:
+            image = GdkPixbuf.Pixbuf.new_from_file(path)
+            if self._preset_canvas_zoom != 1.0:
+                width, height = image.get_width(), image.get_height()
+                zoom = self._preset_canvas_zoom
+                scaled = image.scale_simple(round(width * zoom), round(height * zoom),
+                                            GdkPixbuf.InterpType.BILINEAR)
+                if scaled is None:
+                    raise ValueError('Não foi possível aplicar zoom na prévia')
+                image = GdkPixbuf.Pixbuf.new_subpixbuf(
+                    scaled, (scaled.get_width() - width) // 2,
+                    (scaled.get_height() - height) // 2, width, height)
+            self.preset_canvas_picture.set_paintable(Gdk.Texture.new_for_pixbuf(image))
+        except (GLib.Error, OSError, ValueError):
+            self.preset_canvas_picture.set_paintable(None)
+            self.preset_canvas_status.set_text('Não foi possível carregar a prévia; confira o caminho da imagem.')
+
+    def _preset_canvas_draw(self, _area, cr, width, height):
+        if not self._preset_editor_active() or width <= 0 or height <= 0:
+            return
+        cx, cy, unit = display_geometry(width, height, self._preset_canvas_zoom)
+        cr.set_line_width(1.0)
+        cr.set_source_rgba(0.45, 0.78, 0.98, .55)
+        cr.move_to(cx, 0)
+        cr.line_to(cx, height)
+        cr.move_to(0, cy)
+        cr.line_to(width, cy)
+        cr.stroke()
+        gx, gy = self._preset_canvas_guides
+        cr.set_source_rgba(1.0, .76, .2, .95)
+        cr.set_line_width(2.0)
+        for value, vertical in ((gx, True), (gy, False)):
+            if value is None:
+                continue
+            if vertical:
+                cr.move_to(cx + value * unit, 0)
+                cr.line_to(cx + value * unit, height)
+            else:
+                cr.move_to(0, cy + value * unit)
+                cr.line_to(width, cy + value * unit)
+        cr.stroke()
+        try:
+            regions = canvas_regions(self._preset_canvas_style(),
+                                     image_present=bool(self.preset_editor_image.get_text()),
+                                     width=width, height=height, zoom=self._preset_canvas_zoom)
+        except (ValueError, KeyError, TypeError):
+            return  # Campos ainda em edição podem estar temporariamente inválidos.
+        for name, region in regions.items():
+            selected = name == self._preset_canvas_target
+            cr.set_line_width(2.5 if selected else 1.0)
+            if name == 'image':
+                cr.set_source_rgba(.2, .85, 1., .96)
+            else:
+                cr.set_source_rgba(1., .72, .23, .96)
+            cr.rectangle(region.x, region.y, region.width, region.height)
+            cr.stroke()
+        if self._preset_canvas_target == 'image' and 'image' in regions:
+            from vision02.studio_composition_v2 import visible_handle_position
+            style = self._preset_canvas_style()
+            hx, hy = visible_handle_position(width, height, style['image_x'], style['image_y'],
+                                              style['image_scale'], self._preset_canvas_zoom)
+            cr.set_source_rgba(.14, .73, .93, .9)
+            cr.rectangle(hx - 7, hy - 7, 14, 14)
+            cr.fill()
+
+    def _preset_canvas_drag_begin(self, _gesture, x, y):
+        self._preset_canvas_before_drag = None
+        self._preset_canvas_guides = (None, None)
+        if not self._preset_editor_active() or self._preset_editor_sync or self._preset_busy():
+            return
+        width, height = self._preset_canvas_size()
+        if width <= 0 or height <= 0:
+            return
+        try:
+            style = self._preset_canvas_style()
+            image = bool(self.preset_editor_image.get_text())
+            handle = (self._preset_canvas_target == 'image' and resize_hit(
+                style, image_present=image, width=width, height=height,
+                zoom=self._preset_canvas_zoom, x=x, y=y))
+            hit = ('image' if handle else select_at(
+                style, image_present=image, width=width, height=height,
+                zoom=self._preset_canvas_zoom, x=x, y=y, preferred=self._preset_canvas_target))
+        except (ValueError, KeyError, TypeError):
+            return
+        if not hit:
+            return
+        self.preset_canvas_target.set_selected(0 if hit == 'image' else 1)
+        self._preset_canvas_before_drag = dict(style)
+        self._preset_canvas_drag_kind = 'resize' if handle else 'move'
+        self.preset_canvas_status.set_text('Redimensionando imagem…' if handle else 'Movendo ' + ('imagem…' if hit == 'image' else 'texto…'))
+
+    def _preset_canvas_drag_update(self, _gesture, dx, dy):
+        before = self._preset_canvas_before_drag
+        if before is None or not self._preset_editor_active() or self._preset_busy():
+            return
+        width, height = self._preset_canvas_size()
+        try:
+            style, guides = transform(before, self._preset_canvas_target,
+                 self._preset_canvas_drag_kind, dx, dy, width, height,
+                 self._preset_canvas_zoom, snap=self.preset_canvas_snap.get_active())
+        except (ValueError, KeyError, TypeError):
+            return
+        self._preset_canvas_drag_updating = True
+        try:
+            for key in ('image_x', 'image_y', 'image_scale', 'offset_x', 'offset_y'):
+                if key in style and style[key] != int(self.preset_editor_widgets[key].get_value()):
+                    self.preset_editor_widgets[key].set_value(style[key])
+        finally:
+            self._preset_canvas_drag_updating = False
+        self._preset_canvas_guides = guides
+        self.preset_canvas_overlay.queue_draw()
+
+    def _preset_canvas_drag_end(self, *_):
+        before = self._preset_canvas_before_drag
+        self._preset_canvas_before_drag = None
+        self._preset_canvas_guides = (None, None)
+        self.preset_canvas_overlay.queue_draw()
+        if before is None:
+            return
+        if self._preset_editor_active():
+            try:
+                if before != self._preset_canvas_style():
+                    self._preset_editor_changed()  # uma só entrada de histórico por gesto
+            except (ValueError, KeyError, TypeError):
+                pass
+        self.preset_canvas_status.set_text('Rascunho local atualizado; use Salvar ou Salvar como para persistir.')
 
     def _preset_editor_active(self):
         return (self._preset_editor_draft is not None
@@ -720,9 +926,11 @@ class StudioWindow(Adw.ApplicationWindow):
             self._preset_editor_sync = False
         self._preset_editor_controls()
         self._preset_editor_schedule()
+        self._preset_canvas_guides = (None, None)
+        self.preset_canvas_overlay.queue_draw()
 
     def _preset_editor_changed(self, *_):
-        if self._preset_editor_sync or not self._preset_editor_draft:
+        if self._preset_editor_sync or self._preset_canvas_drag_updating or not self._preset_editor_draft:
             return
         snapshot = json.dumps(self._preset_editor_collect(), ensure_ascii=False, sort_keys=True)
         if not self._preset_editor_history or snapshot != self._preset_editor_history[self._preset_editor_cursor]:
@@ -735,6 +943,7 @@ class StudioWindow(Adw.ApplicationWindow):
                 self._preset_editor_cursor -= 1
         self._preset_editor_controls()
         self._preset_editor_schedule()
+        self.preset_canvas_overlay.queue_draw()
 
     def _preset_editor_controls(self, *_):
         if not hasattr(self, 'preset_editor_save_btn'):
@@ -830,6 +1039,8 @@ class StudioWindow(Adw.ApplicationWindow):
     def _preset_editor_received(self, command, response):
         if command == 'preset_editor_load':
             self._preset_editor_draft = {key: response[key] for key in ('id', 'name', 'revision')}
+            self._preset_canvas_preview_path = None
+            self._preset_canvas_render_image()
             style = response['appearance']
             if style is None:
                 from vision02.profiles.models import KeyAppearance
@@ -842,6 +1053,9 @@ class StudioWindow(Adw.ApplicationWindow):
         elif command == 'preset_editor_preview':
             if self._preset_editor_active() and response['id'] == self._preset_editor_draft['id']:
                 self.preset_editor_picture.set_file(Gio.File.new_for_path(response['image']))
+                self._preset_canvas_preview_path = response['image']
+                self._preset_canvas_render_image()
+                self.preset_canvas_overlay.queue_draw()
                 self.preset_editor_status.set_text('Prévia local atualizada. Nenhum YAML ou LCD foi alterado.')
             if self._preset_editor_preview_pending:
                 self._preset_editor_preview_pending = False
