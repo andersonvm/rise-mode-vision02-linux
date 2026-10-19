@@ -2,6 +2,18 @@
 
 **Projeto independente de software oficial** para controlar e personalizar o **Rise Mode Vision 02** no Linux, com **15 teclas programáveis e displays LCD individuais**. Desenvolvido e testado no Ubuntu, integra um controlador USB/HID em Python, serviço de supervisão, perfis YAML, ações, integração OBS Studio e uma interface gráfica **Vision 02 Studio** baseada em GTK4/libadwaita.
 
+## Instalação por pacote Debian (Ubuntu 24.04+)
+
+**[Baixar a última versão estável (.deb) — GitHub Releases](https://github.com/andersonvm/rise-mode-vision02-linux/releases/latest)**
+
+Na página da versão, abra **Assets**, baixe o arquivo `vision02-studio-desktop_15.0.0-1_all.deb` (ou a versão mais recente) e instale com o gerenciador de pacotes do Ubuntu:
+
+```bash
+sudo apt install ./vision02-studio-desktop_*_all.deb
+```
+
+O pacote inclui o Studio e as bibliotecas do projeto, instala o atalho no menu do Ubuntu e resolve as dependências Python/GTK pelo `apt`. **Não ativa automaticamente o serviço HID**, não altera seus perfis pessoais e não substitui configurações OBS. Para operar os LCDs, configure o controlador com IPC; consulte o [guia de instalação Debian](docs/instalacao-deb.md).
+
 > **Estado do projeto:** a interface **Studio v15** está implementada no código-fonte deste repositório. A versão do *pacote Python* ainda consta como `0.2.0` em `pyproject.toml`; são numerações diferentes. Este é um projeto comunitário, não afiliado ao fabricante.
 
 ## O que já funciona
