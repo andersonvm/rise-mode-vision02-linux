@@ -91,7 +91,7 @@ jobs:
           sudo apt-get install -y ./dist/*.deb
           dpkg-query -W vision02-studio-desktop
           vision02-studio-control --help | grep -q 'usage:'
-          python3 -m compileall -q /opt/vision02-studio/apps /opt/vision02-studio/src
+          sudo python3 -m compileall -q /opt/vision02-studio/apps /opt/vision02-studio/src
 
       - name: Upload DEB and checksum
         uses: actions/upload-artifact@v4
