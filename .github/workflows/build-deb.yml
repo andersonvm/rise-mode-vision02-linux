@@ -1,0 +1,104 @@
+name: Build Ubuntu DEB
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Versão Debian opcional (ex.: 15.0.0~teste1)'
+        required: false
+        type: string
+  push:
+    branches: [main]
+    tags: ['v[0-9]*']
+
+permissions:
+  contents: write
+
+jobs:
+  package:
+    name: Test and package (Ubuntu 24.04)
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install test dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e '.[dev,wayland]'
+
+      - name: Run regression tests
+        run: python -m pytest -q
+
+      - name: Resolve DEB version
+        id: deb_version
+        env:
+          INPUT_VERSION: ${{ inputs.version || '' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            version="${GITHUB_REF_NAME#v}"
+          elif [[ -n "$INPUT_VERSION" ]]; then
+            version="$INPUT_VERSION"
+          else
+            version="15.0.0~ci${GITHUB_RUN_NUMBER}"
+          fi
+          if [[ ! "$version" =~ ^[0-9][0-9A-Za-z.+~]*$ ]]; then
+            echo "Invalid Debian upstream version: $version" >&2
+            exit 1
+          fi
+          echo "value=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Build self-contained Studio package
+        run: |
+          python packaging/debian/build_deb.py \
+            --version '${{ steps.deb_version.outputs.value }}' \
+            --output dist
+          dpkg-deb --info dist/*.deb
+          dpkg-deb --contents dist/*.deb > /tmp/vision02-package-contents.txt
+          head -40 /tmp/vision02-package-contents.txt
+
+      - name: Check package contents and launchers
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p extracted
+          dpkg-deb -x dist/*.deb extracted/
+          test -x extracted/usr/bin/vision02-studio-launch
+          test -x extracted/usr/bin/vision02-studio-control
+          test -f extracted/opt/vision02-studio/apps/vision02_studio.py
+          test -f extracted/opt/vision02-studio/src/vision02/studio_profile_menu_v15.py
+          test -f extracted/opt/vision02-studio/examples/profiles/openboard.yaml
+          test -L extracted/opt/vision02-studio/.venv/bin/python
+          test -f extracted/usr/share/applications/io.github.vision02.Studio.desktop
+          test -f extracted/usr/share/icons/hicolor/scalable/apps/io.github.vision02.Studio.svg
+          ! find extracted -name 'obs.json' -o -name '*.pcap' | grep .
+          (cd dist && sha256sum *.deb > SHA256SUMS)
+
+      - name: Upload DEB and checksum
+        uses: actions/upload-artifact@v4
+        with:
+          name: vision02-studio-deb-${{ steps.deb_version.outputs.value }}
+          path: |
+            dist/*.deb
+            dist/SHA256SUMS
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Publish GitHub Release (tag only)
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          gh release create "$GITHUB_REF_NAME" dist/*.deb dist/SHA256SUMS \
+            --title "Vision 02 Studio $GITHUB_REF_NAME" \
+            --notes "Instalador DEB para Ubuntu 24.04+ (GTK4). O serviço HID não é ativado automaticamente. Veja README.md para configuração."
