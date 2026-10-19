@@ -108,6 +108,12 @@ class StudioWindow(Adw.ApplicationWindow):
         self._quick_batch_pending_apply = False
         self._preset_items = []
         self._gallery_items = []
+        self._preset_editor_draft = None
+        self._preset_editor_history = []
+        self._preset_editor_cursor = -1
+        self._preset_editor_sync = False
+        self._preset_editor_timer = 0
+        self._preset_editor_preview_pending = False
         self._preset_pending_apply = False
         self._icons = []
         self._quick_icon_buttons = {}
@@ -545,6 +551,7 @@ class StudioWindow(Adw.ApplicationWindow):
         parent.append(self.preset_status)
         self._preset_controls()
         self._build_presets_v11(parent)
+        self._build_presets_v12(parent)
         self._call('preset_list')
 
     def _build_presets_v11(self, parent):
@@ -597,6 +604,262 @@ class StudioWindow(Adw.ApplicationWindow):
         duplicate_row.append(self.gallery_duplicate_name)
         self.gallery_duplicate_btn = _button(duplicate_row, 'Duplicar preset', self._gallery_duplicate)
         self._gallery_update_selected()
+
+    # v12: o formulário altera somente um rascunho; o backend é responsável
+    # por validar caminhos, imagens, concorrência e persistência em disco.
+    def _build_presets_v12(self, parent):
+        expander = Gtk.Expander(label='Editor visual de presets (v12)')
+        parent.append(expander)
+        box = _box(False, 6)
+        expander.set_child(box)
+        box.append(_label('Carregue um preset para criar um rascunho. Nem YAML nem LCD '
+                          'são modificados ao pré-visualizar.', style='caption', wrap=True))
+        self.preset_editor_load_btn = _button(
+            box, 'Carregar preset selecionado para edição', self._preset_editor_load)
+        self.preset_editor_title = _label('Nenhum rascunho carregado.', wrap=True)
+        box.append(self.preset_editor_title)
+        self.preset_editor_widgets = {}
+        self.preset_editor_enums = {}
+        self.preset_editor_fields = (
+            ('background', 'Fundo #RRGGBB'), ('text', 'Texto visual (vazio = rótulo da tecla)'),
+            ('text_color', 'Cor do texto #RRGGBB'),
+        )
+        for key, caption in self.preset_editor_fields:
+            box.append(_label(caption, style='caption'))
+            entry = Gtk.Entry()
+            entry.connect('changed', self._preset_editor_changed)
+            box.append(entry)
+            self.preset_editor_widgets[key] = entry
+        for key, title, options in (
+            ('font_family', 'Fonte', ['sans', 'serif', 'mono']),
+            ('font_weight', 'Peso da fonte', ['regular', 'bold']),
+            ('horizontal', 'Alinhamento horizontal', ['left', 'center', 'right']),
+            ('vertical', 'Alinhamento vertical', ['top', 'center', 'bottom']),
+            ('image_fit', 'Enquadramento da imagem', ['cover', 'contain', 'stretch']),
+        ):
+            box.append(_label(title, style='caption'))
+            combo = Gtk.DropDown.new_from_strings(options)
+            combo.connect('notify::selected', self._preset_editor_changed)
+            box.append(combo)
+            self.preset_editor_widgets[key] = combo
+            self.preset_editor_enums[key] = options
+        for key, title, lower, upper in (
+            ('font_size', 'Tamanho da fonte', 8, 36),
+            ('offset_x', 'Texto X', -40, 40), ('offset_y', 'Texto Y', -40, 40),
+            ('image_x', 'Imagem X', -100, 100), ('image_y', 'Imagem Y', -100, 100),
+            ('image_scale', 'Escala da imagem (%)', 25, 200),
+        ):
+            row = _box(True, 7)
+            box.append(row)
+            row.append(_label(title))
+            spin = Gtk.SpinButton.new_with_range(lower, upper, 1)
+            spin.connect('value-changed', self._preset_editor_changed)
+            row.append(spin)
+            self.preset_editor_widgets[key] = spin
+        self.preset_editor_show_text = Gtk.CheckButton(label='Exibir texto')
+        self.preset_editor_show_text.connect('toggled', self._preset_editor_changed)
+        box.append(self.preset_editor_show_text)
+        box.append(_label('Imagem do preset (PNG/JPG/WebP local)', style='caption'))
+        self.preset_editor_image = Gtk.Entry()
+        self.preset_editor_image.connect('changed', self._preset_editor_changed)
+        box.append(self.preset_editor_image)
+        row = _box(True, 6)
+        box.append(row)
+        _button(row, 'Escolher imagem…', self._preset_editor_choose_image)
+        _button(row, 'Remover imagem do rascunho', lambda *_: self.preset_editor_image.set_text(''))
+        row = _box(True, 6)
+        box.append(row)
+        self.preset_editor_undo_btn = _button(row, 'Desfazer', self._preset_editor_undo)
+        self.preset_editor_redo_btn = _button(row, 'Refazer', self._preset_editor_redo)
+        self.preset_editor_picture = Gtk.Picture()
+        self.preset_editor_picture.set_size_request(200, 200)
+        self.preset_editor_picture.set_content_fit(Gtk.ContentFit.CONTAIN)
+        box.append(self.preset_editor_picture)
+        row = _box(True, 6)
+        box.append(row)
+        self.preset_editor_save_btn = _button(row, 'Salvar alterações no preset', self._preset_editor_save)
+        self.preset_editor_as_name = Gtk.Entry()
+        self.preset_editor_as_name.set_placeholder_text('Novo nome para Salvar como…')
+        self.preset_editor_as_name.connect('changed', self._preset_editor_controls)
+        box.append(self.preset_editor_as_name)
+        self.preset_editor_save_as_btn = _button(box, 'Salvar como novo preset', self._preset_editor_save_as)
+        self.preset_editor_status = _label('Carregue um preset antes de editar.', wrap=True)
+        box.append(self.preset_editor_status)
+        self._preset_editor_controls()
+
+    def _preset_editor_active(self):
+        return (self._preset_editor_draft is not None
+                and self._preset_active() == self._preset_editor_draft['id'])
+
+    def _preset_editor_collect(self):
+        style = {}
+        for key, _ in self.preset_editor_fields:
+            value = self.preset_editor_widgets[key].get_text()
+            style[key] = None if key == 'text' and value == '' else value
+        for key, options in self.preset_editor_enums.items():
+            index = self.preset_editor_widgets[key].get_selected()
+            style[key] = options[index] if index < len(options) else options[0]
+        for key in ('font_size', 'offset_x', 'offset_y', 'image_x', 'image_y', 'image_scale'):
+            style[key] = int(self.preset_editor_widgets[key].get_value())
+        style['show_text'] = self.preset_editor_show_text.get_active()
+        return {'appearance': style, 'image': self.preset_editor_image.get_text()}
+
+    def _preset_editor_fill(self, snapshot):
+        self._preset_editor_sync = True
+        try:
+            style = snapshot['appearance']
+            for key, _ in self.preset_editor_fields:
+                self.preset_editor_widgets[key].set_text(style.get(key) or '')
+            for key, options in self.preset_editor_enums.items():
+                self.preset_editor_widgets[key].set_selected(options.index(style[key]))
+            for key in ('font_size', 'offset_x', 'offset_y', 'image_x', 'image_y', 'image_scale'):
+                self.preset_editor_widgets[key].set_value(style[key])
+            self.preset_editor_show_text.set_active(style['show_text'])
+            self.preset_editor_image.set_text(snapshot['image'])
+        finally:
+            self._preset_editor_sync = False
+        self._preset_editor_controls()
+        self._preset_editor_schedule()
+
+    def _preset_editor_changed(self, *_):
+        if self._preset_editor_sync or not self._preset_editor_draft:
+            return
+        snapshot = json.dumps(self._preset_editor_collect(), ensure_ascii=False, sort_keys=True)
+        if not self._preset_editor_history or snapshot != self._preset_editor_history[self._preset_editor_cursor]:
+            self._preset_editor_history = self._preset_editor_history[:self._preset_editor_cursor + 1]
+            self._preset_editor_history.append(snapshot)
+            self._preset_editor_cursor += 1
+            if len(self._preset_editor_history) > 101:
+                # Preservar primeiro estado e até 100 revisões recentes.
+                self._preset_editor_history.pop(1)
+                self._preset_editor_cursor -= 1
+        self._preset_editor_controls()
+        self._preset_editor_schedule()
+
+    def _preset_editor_controls(self, *_):
+        if not hasattr(self, 'preset_editor_save_btn'):
+            return
+        busy = any(command in self._busy for command in (
+            'preset_editor_load', 'preset_editor_save', 'preset_editor_save_as'))
+        active = self._preset_editor_active() and not busy
+        dirty = bool(self._preset_editor_history and self._preset_editor_cursor >= 0
+                     and self._preset_editor_history[self._preset_editor_cursor] != self._preset_editor_history[0])
+        self.preset_editor_save_btn.set_sensitive(active and dirty)
+        self.preset_editor_save_as_btn.set_sensitive(active and bool(self.preset_editor_as_name.get_text().strip()))
+        self.preset_editor_undo_btn.set_sensitive(active and self._preset_editor_cursor > 0)
+        self.preset_editor_redo_btn.set_sensitive(active and self._preset_editor_cursor + 1 < len(self._preset_editor_history))
+        self.preset_editor_load_btn.set_sensitive(bool(self._preset_active()) and not busy)
+        self.preset_editor_title.set_text(
+            ('Rascunho: ' + self._preset_editor_draft['name'] + (' *' if dirty else ''))
+            if self._preset_editor_draft else 'Nenhum rascunho carregado.')
+
+    def _preset_editor_load(self, *_):
+        ident = self._preset_active()
+        if not ident:
+            return
+        dirty = (self._preset_editor_draft and self._preset_editor_history
+                 and self._preset_editor_history[self._preset_editor_cursor] != self._preset_editor_history[0])
+        if dirty:
+            dialog = Gtk.MessageDialog(transient_for=self, modal=True,
+                message_type=Gtk.MessageType.WARNING, buttons=Gtk.ButtonsType.NONE,
+                text='Descartar alterações não salvas do preset?')
+            dialog.format_secondary_text('O rascunho atual será substituído. Os arquivos salvos permanecerão intactos.')
+            dialog.add_button('Cancelar', Gtk.ResponseType.CANCEL)
+            dialog.add_button('Descartar rascunho', Gtk.ResponseType.ACCEPT)
+            def done(widget, response):
+                widget.destroy()
+                if response == Gtk.ResponseType.ACCEPT:
+                    self._call('preset_editor_load', id=ident)
+            dialog.connect('response', done)
+            dialog.present()
+        else:
+            self._call('preset_editor_load', id=ident)
+            self.preset_editor_status.set_text('Carregando preset do disco…')
+
+    def _preset_editor_undo(self, *_):
+        if self._preset_editor_cursor > 0 and self._preset_editor_active():
+            self._preset_editor_cursor -= 1
+            self._preset_editor_fill(json.loads(self._preset_editor_history[self._preset_editor_cursor]))
+
+    def _preset_editor_redo(self, *_):
+        if self._preset_editor_active() and self._preset_editor_cursor + 1 < len(self._preset_editor_history):
+            self._preset_editor_cursor += 1
+            self._preset_editor_fill(json.loads(self._preset_editor_history[self._preset_editor_cursor]))
+
+    def _preset_editor_choose_image(self, *_):
+        if not self._preset_editor_active():
+            return
+        chooser = Gtk.FileChooserNative.new('Selecionar imagem do preset', self, Gtk.FileChooserAction.OPEN,
+                                           'Selecionar', 'Cancelar')
+        def selected(dialog, result):
+            if result == Gtk.ResponseType.ACCEPT and dialog.get_file():
+                path = dialog.get_file().get_path()
+                if path:
+                    self.preset_editor_image.set_text(path)
+        chooser.connect('response', selected)
+        chooser.show()
+
+    def _preset_editor_schedule(self):
+        if self._preset_editor_timer:
+            GLib.source_remove(self._preset_editor_timer)
+        if self._preset_editor_active():
+            self._preset_editor_timer = GLib.timeout_add(350, self._preset_editor_preview)
+
+    def _preset_editor_preview(self):
+        self._preset_editor_timer = 0
+        if not self._preset_editor_active():
+            return False
+        if 'preset_editor_preview' in self._busy:
+            self._preset_editor_preview_pending = True
+        else:
+            self._call('preset_editor_preview', id=self._preset_editor_draft['id'],
+                       revision=self._preset_editor_draft['revision'], **self._preset_editor_collect())
+        return False
+
+    def _preset_editor_save(self, *_):
+        if self._preset_editor_active():
+            self._call('preset_editor_save', id=self._preset_editor_draft['id'],
+                       revision=self._preset_editor_draft['revision'], **self._preset_editor_collect())
+
+    def _preset_editor_save_as(self, *_):
+        if self._preset_editor_active():
+            self._call('preset_editor_save_as', id=self._preset_editor_draft['id'],
+                       revision=self._preset_editor_draft['revision'], name=self.preset_editor_as_name.get_text(),
+                       **self._preset_editor_collect())
+
+    def _preset_editor_received(self, command, response):
+        if command == 'preset_editor_load':
+            self._preset_editor_draft = {key: response[key] for key in ('id', 'name', 'revision')}
+            style = response['appearance']
+            if style is None:
+                from vision02.profiles.models import KeyAppearance
+                style = vars(KeyAppearance())
+            snapshot = {'appearance': style, 'image': response['image']}
+            self._preset_editor_history = [json.dumps(snapshot, ensure_ascii=False, sort_keys=True)]
+            self._preset_editor_cursor = 0
+            self._preset_editor_fill(snapshot)
+            self.preset_editor_status.set_text('Rascunho carregado. Edite e revise a prévia antes de salvar.')
+        elif command == 'preset_editor_preview':
+            if self._preset_editor_active() and response['id'] == self._preset_editor_draft['id']:
+                self.preset_editor_picture.set_file(Gio.File.new_for_path(response['image']))
+                self.preset_editor_status.set_text('Prévia local atualizada. Nenhum YAML ou LCD foi alterado.')
+            if self._preset_editor_preview_pending:
+                self._preset_editor_preview_pending = False
+                self._preset_editor_schedule()
+        elif command in ('preset_editor_save', 'preset_editor_save_as'):
+            if command == 'preset_editor_save':
+                self._preset_editor_draft['revision'] = response['revision']
+                snapshot = self._preset_editor_collect()
+                snapshot['image'] = response['image']
+                self._preset_editor_fill(snapshot)
+                self._preset_editor_history = [json.dumps(snapshot, ensure_ascii=False, sort_keys=True)]
+                self._preset_editor_cursor = 0
+                self.preset_editor_status.set_text('Preset salvo. Backup: ' + response['backup'])
+            else:
+                self.preset_editor_status.set_text('Nova variação criada. Selecione-a e carregue no editor.')
+                self.preset_editor_as_name.set_text('')
+            self._call('preset_list')
+        self._preset_editor_controls()
 
     def _gallery_item(self):
         ident = self._preset_active()
@@ -708,6 +971,8 @@ class StudioWindow(Adw.ApplicationWindow):
                 if 0 <= index < len(self._preset_items) else None)
 
     def _preset_selected(self, *_):
+        if hasattr(self, 'preset_editor_save_btn'):
+            self._preset_editor_controls()
         self.preset_confirm.set_active(False)
         self.preset_picture.set_paintable(None)
         self._preset_controls()
@@ -722,7 +987,8 @@ class StudioWindow(Adw.ApplicationWindow):
                    'quick_inspect', 'preset_apply', 'preset_create', 'preset_delete',
                    'preset_rename', 'preset_import', 'preset_export', 'preset_gallery',
                    'preset_gallery_favorite', 'preset_gallery_category',
-                   'preset_gallery_duplicate'))
+                   'preset_gallery_duplicate', 'preset_editor_load', 'preset_editor_preview',
+                   'preset_editor_save', 'preset_editor_save_as'))
 
     def _preset_controls(self, *_):
         if not hasattr(self, 'preset_apply_btn'):
@@ -826,6 +1092,9 @@ class StudioWindow(Adw.ApplicationWindow):
                               'Exportar preset ZIP', 'Exportar')
 
     def _preset_received(self, command, response):
+        if command.startswith('preset_editor_'):
+            self._preset_editor_received(command, response)
+            return
         if command == 'preset_gallery':
             self._gallery_refresh(response['items'])
             return
@@ -2393,6 +2662,11 @@ class StudioWindow(Adw.ApplicationWindow):
                 self.top_status.set_text('Serviço indisponível')
                 self.dashboard_state.set_text(f'Serviço indisponível: {message}')
             elif command.startswith('preset_'):
+                if command.startswith('preset_editor_') and hasattr(self, 'preset_editor_status'):
+                    self.preset_editor_status.set_text(f'Falha: {message}')
+                    if command == 'preset_editor_preview' and self._preset_editor_preview_pending:
+                        self._preset_editor_preview_pending = False
+                        self._preset_editor_schedule()
                 self.preset_status.set_text(f'Falha: {message}')
                 self._preset_controls()
             elif command.startswith('quick_'):

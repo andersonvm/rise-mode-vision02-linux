@@ -16,7 +16,7 @@ from pathlib import Path
 import re
 import tempfile
 import unicodedata
-from zipfile import ZIP_DEFLATED, ZipFile
+from zipfile import ZIP_DEFLATED, ZipFile, ZipInfo
 
 from PIL import Image, ImageOps
 import yaml
@@ -323,6 +323,19 @@ def apply_preset(ident: str, profile_path: Path, targets: list[int], expected_sh
             temp.unlink(missing_ok=True)
 
 
+def _write_export_member(archive: ZipFile, name: str, data: bytes) -> None:
+    """Escreve arquivos com metadados fixos para ZIPs reprodutíveis.
+
+    A exportação deve produzir bytes idênticos quando os conteúdos do
+    manifesto e da imagem não mudam, mesmo em instantes diferentes.
+    """
+    info = ZipInfo(name, date_time=(1980, 1, 1, 0, 0, 0))
+    info.compress_type = ZIP_DEFLATED
+    info.create_system = 3
+    info.external_attr = 0o100600 << 16
+    archive.writestr(info, data)
+
+
 def export_preset(ident: str, target: Path) -> dict:
     manifest, picture = _read(ident)
     if target.suffix.lower() != '.zip' or target.is_symlink() or target.exists():
@@ -334,9 +347,9 @@ def export_preset(ident: str, target: Path) -> dict:
     try:
         with os.fdopen(fd, 'wb') as stream:
             with ZipFile(stream, 'w', compression=ZIP_DEFLATED) as archive:
-                archive.writestr('preset.json', _json_bytes(manifest))
+                _write_export_member(archive, 'preset.json', _json_bytes(manifest))
                 if picture:
-                    archive.writestr('image.png', picture)
+                    _write_export_member(archive, 'image.png', picture)
         os.chmod(tmp, 0o600)
         os.link(tmp, target)
     finally:

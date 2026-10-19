@@ -28,6 +28,7 @@ from vision02.studio_presets_v10 import (
     export_preset, import_preset, preview_data,
 )
 from vision02_editor_backend import _resolve_profile, _validate_at_same_location, preview_appearance
+from vision02.studio_preset_editor_v12 import load_draft, preview_draft, save_draft
 from vision02.studio_preset_gallery_v11 import (
     gallery_items, update_metadata, duplicate_preset, remove_metadata,
 )
@@ -77,6 +78,24 @@ def run(command: str, body: dict | None = None, *, project: Path = ROOT) -> dict
             raise ValueError('Revisão SHA-256 inválida')
         return {'profile': name, **save_batch_appearance(
             project, name, body['source_key'], body['targets'], expected)}
+    if command.startswith('preset_editor_'):
+        if command == 'preset_editor_load':
+            if set(body) != {'id'}:
+                raise ValueError('Informe o preset para editar')
+            return {'ok': True, **load_draft(body['id'])}
+        if command in ('preset_editor_preview', 'preset_editor_save', 'preset_editor_save_as'):
+            fields = {'id', 'revision', 'appearance', 'image'}
+            if command == 'preset_editor_save_as':
+                fields.add('name')
+            if set(body) != fields:
+                raise ValueError('Campos do rascunho inválidos')
+            options = (body['id'], body['revision'], body['appearance'], body['image'])
+            if command == 'preset_editor_preview':
+                return {'ok': True, **preview_draft(*options)}
+            if command == 'preset_editor_save_as':
+                return {'ok': True, **save_draft(*options, save_as=body['name'])}
+            return {'ok': True, **save_draft(*options)}
+        raise ValueError('Comando do editor de presets desconhecido')
     if command.startswith('preset_'):
         if command == 'preset_gallery':
             if body:
@@ -196,7 +215,8 @@ def main(argv=None):
                                  'import_icon', 'system', 'obs', 'preset_list', 'preset_create', 'preset_rename',
                                  'preset_delete', 'preset_import', 'preset_export', 'preset_apply', 'preset_preview',
                                  'preset_gallery', 'preset_gallery_favorite', 'preset_gallery_category',
-                                 'preset_gallery_duplicate'))
+                                 'preset_gallery_duplicate', 'preset_editor_load', 'preset_editor_preview',
+                                 'preset_editor_save', 'preset_editor_save_as'))
     args = parser.parse_args(argv)
     try:
         payload = json.load(sys.stdin) if not sys.stdin.isatty() and not sys.stdin.closed else {}
