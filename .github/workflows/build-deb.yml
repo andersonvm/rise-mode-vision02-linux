@@ -83,6 +83,16 @@ jobs:
           ! find extracted -name 'obs.json' -o -name '*.pcap' | grep .
           (cd dist && sha256sum *.deb > SHA256SUMS)
 
+      - name: Install Debian package and smoke-test CLI
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y ./dist/*.deb
+          dpkg-query -W vision02-studio-desktop
+          vision02-studio-control --help | grep -q 'usage:'
+          python3 -m compileall -q /opt/vision02-studio/apps /opt/vision02-studio/src
+
       - name: Upload DEB and checksum
         uses: actions/upload-artifact@v4
         with:
@@ -93,12 +103,37 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
-      - name: Publish GitHub Release (tag only)
-        if: startsWith(github.ref, 'refs/tags/v')
+      - name: Publish stable GitHub Release
+        # First stable release is created by a successful main build.
+        # Later versions are published by a new vN.N.N tag, not by rewriting an existing release.
+        if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'push' && github.ref == 'refs/heads/main')
         env:
           GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
-          gh release create "$GITHUB_REF_NAME" dist/*.deb dist/SHA256SUMS \
-            --title "Vision 02 Studio $GITHUB_REF_NAME" \
-            --notes "Instalador DEB para Ubuntu 24.04+ (GTK4). O serviço HID não é ativado automaticamente. Veja README.md para configuração."
+          set -euo pipefail
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            release_tag="$GITHUB_REF_NAME"
+          else
+            release_tag="v15.0.0"
+          fi
+          if gh release view "$release_tag" >/dev/null 2>&1; then
+            echo "Release $release_tag already exists. Keeping published assets unchanged."
+            exit 0
+          fi
+          if git ls-remote --exit-code --tags origin "refs/tags/$release_tag" >/dev/null 2>&1; then
+            echo "Tag $release_tag exists but has no release; only a tagged build may publish it." >&2
+            exit 1
+          fi
+          if [[ "$GITHUB_REF" != refs/tags/v* ]]; then
+            # This build gets the stable version, never the disposable CI version.
+            python packaging/debian/build_deb.py --version 15.0.0 --output stable-dist
+            (cd stable-dist && sha256sum *.deb > SHA256SUMS)
+            artifacts=(stable-dist/*.deb stable-dist/SHA256SUMS)
+          else
+            artifacts=(dist/*.deb dist/SHA256SUMS)
+          fi
+          gh release create "$release_tag" "${artifacts[@]}" \
+            --target "$GITHUB_SHA" \
+            --title "Vision 02 Studio $release_tag" \
+            --notes "Primeira distribuição estável do Studio GTK4 com grade 5×3, galeria de ícones, Menu de Perfis v15 e exemplo OpenBoard. Para instalar no Ubuntu 24.04+: sudo apt install ./vision02-studio-desktop_*.deb. Requer configurar o serviço HID separadamente. Consulte docs/instalacao-deb.md."
