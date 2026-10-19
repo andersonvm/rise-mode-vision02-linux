@@ -33,6 +33,11 @@ from vision02.studio_alpha_hit_v8 import (
     extract_alpha, mask_candidates, choose_mask_layer, next_mask_layer, mask_regions,
 )
 from vision02.studio_composition_v4 import nudge_state, guides_at_position, coordinate_caption
+from vision02.studio_deck_layout_v14 import (
+    DECK_KEY_WIDTH, DECK_KEY_HEIGHT, DECK_ICON_SIZE,
+    DECK_COLUMN_SPACING, DECK_ROW_SPACING, recommended_window_size,
+    load_window_size, save_window_size, deck_key_position,
+)
 from vision02.studio_preset_canvas_v13 import (
     canvas_regions, select_at, resize_hit, transform,
 )
@@ -83,9 +88,22 @@ def _box(horizontal=False, spacing=10):
 class StudioWindow(Adw.ApplicationWindow):
     def __init__(self, app):
         super().__init__(application=app, title='Vision 02 Studio')
-        self.set_default_size(1180, 780)
+        display = Gdk.Display.get_default()
+        monitors = display.get_monitors() if display else None
+        primary = monitors.get_item(0) if monitors and monitors.get_n_items() else None
+        geometry = primary.get_geometry() if primary else None
+        width, height = recommended_window_size(
+            geometry.width if geometry else None,
+            geometry.height if geometry else None,
+        )
+        width, height = load_window_size(width, height)
+        self.set_default_size(width, height)
         self.set_resizable(True)
-        self.set_size_request(820, 560)
+        self.set_size_request(900, 600)
+        # Abrir maximizado (com barra de titulo GNOME) evita exigir que o
+        # usuario redimensione a janela a cada inicializacao. Pode ser
+        # restaurada normalmente pelo botao de janela do compositor.
+        self.maximize()
         self._closed = False
         self._busy = set()
         self._profiles = []
@@ -150,6 +168,8 @@ class StudioWindow(Adw.ApplicationWindow):
         self._syncing = False
         self._sidebar_save_timer = 0
         self._panel_save_timer = 0
+        self._menu_busy = False
+        self._menu_plan = None
 
         toolbar = Adw.ToolbarView()
         header = Adw.HeaderBar()
@@ -198,6 +218,7 @@ class StudioWindow(Adw.ApplicationWindow):
         self._install_key_highlight_css()
         self._build_keys()
         self._build_profiles()
+        self._build_profile_menu()
         self._build_icons()
         self._build_system()
         self._build_obs()
@@ -253,6 +274,52 @@ class StudioWindow(Adw.ApplicationWindow):
             return
         provider = Gtk.CssProvider()
         provider.load_from_data(b"""
+            /* Corpo do equipamento, com acabamento de painel metalico. */
+            frame.vision02-deck-body {
+                background: linear-gradient(155deg, #31343b, #171a20 40%, #0b0d12);
+                border: 2px solid #545b68;
+                border-radius: 26px;
+                box-shadow: inset 0 2px 2px rgba(255,255,255,0.18),
+                            inset 0 -8px 15px rgba(0,0,0,0.43),
+                            0 13px 24px rgba(0,0,0,0.48);
+            }
+            button.vision02-deck-key {
+                background: linear-gradient(165deg, #454a53, #22262d 48%, #101318);
+                border: 2px solid #5a616e;
+                border-radius: 14px;
+                padding: 3px;
+                margin: 0;
+                box-shadow: inset 0 2px 2px rgba(255,255,255,0.15),
+                            0 5px 1px rgba(0,0,0,0.7),
+                            0 7px 7px rgba(0,0,0,0.4);
+            }
+            button.vision02-deck-key:hover {
+                border-color: #87b9e1;
+                background: linear-gradient(155deg, #505c6e, #232e3c);
+            }
+            button.vision02-deck-key:active {
+                box-shadow: inset 0 3px 8px rgba(0,0,0,0.70);
+                background: #131822;
+            }
+            button.vision02-deck-key.vision02-key-selected {
+                border: 2px solid #5dacee;
+                box-shadow: 0 0 0 2px rgba(72,160,231,0.28),
+                            0 5px 1px rgba(0,0,0,0.7);
+            }
+            button.vision02-deck-key.vision02-key-pressed {
+                border: 3px solid #e5a327;
+                box-shadow: 0 0 0 3px rgba(229,163,39,0.30),
+                            inset 0 2px 4px rgba(0,0,0,0.6);
+            }
+            label.vision02-deck-brand {
+                color: #aab5c3;
+                font-size: 11px;
+                font-weight: 800;
+            }
+            label.vision02-key-number {
+                color: #b2b9c6;
+                font-size: 10px;
+            }
             button.vision02-key-selected {
                 border: 2px solid #3584e4;
             }
@@ -306,11 +373,13 @@ class StudioWindow(Adw.ApplicationWindow):
         row.append(self.profile_combo)
         _button(row, 'Atualizar prévias', lambda *_: self._call('previews'))
         _button(row, 'Editar tecla selecionada', self._edit_selected_key)
-        # A grade pode rolar horizontalmente em janelas pequenas; as propriedades
-        # ficam disponíveis numa segunda coluna, sem comprimir os 15 LCDs.
+        # As teclas mantêm dimensões físicas estáveis. O espaço restante é
+        # ocupado pelas margens, não por células esticadas na grade GTK.
         editor_split = Gtk.Paned.new(Gtk.Orientation.HORIZONTAL)
         editor_split.set_wide_handle(True)
-        editor_split.set_position(load_panel_width())
+        # Migrar larguras salvas pela grade antiga: 300 px deixavam apenas
+        # duas das cinco colunas visiveis, mesmo em monitores largos.
+        editor_split.set_position(max(load_panel_width(), 660))
         editor_split.connect('notify::position', self._panel_position_changed)
         self.editor_split = editor_split
         editor_split.set_resize_start_child(True)
@@ -319,28 +388,75 @@ class StudioWindow(Adw.ApplicationWindow):
         editor_split.set_shrink_end_child(False)
         editor_split.set_vexpand(True)
         page.append(editor_split)
+
         key_scroll = Gtk.ScrolledWindow()
         key_scroll.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
-        key_scroll.set_min_content_height(510)
-        key_scroll.set_min_content_width(220)
-        grid_box = _box(False, 12)
+        key_scroll.set_min_content_height(470)
+        # Largura minima do conjunto + margens do chassi. Mantemos scroll
+        # automatico para monitores estreitos e o Paned ajustavel.
+        key_scroll.set_min_content_width(634)
+        grid_box = _box(False, 10)
+        grid_box.set_hexpand(True)
+        grid_box.set_vexpand(True)
         key_scroll.set_child(grid_box)
         editor_split.set_start_child(key_scroll)
-        self.key_grid = Gtk.Grid(column_spacing=8, row_spacing=8)
-        self.key_grid.set_column_homogeneous(True)
-        grid_box.append(self.key_grid)
+
+        # Gtk.CenterBox posiciona o chassi exatamente no centro da área
+        # disponível. Em janelas pequenas, o ScrolledWindow permite rolar.
+        deck_center = Gtk.CenterBox(orientation=Gtk.Orientation.VERTICAL)
+        deck_center.set_hexpand(True)
+        deck_center.set_vexpand(True)
+        grid_box.append(deck_center)
+        deck_frame = Gtk.Frame()
+        deck_frame.add_css_class('vision02-deck-body')
+        deck_frame.set_halign(Gtk.Align.CENTER)
+        deck_frame.set_valign(Gtk.Align.CENTER)
+        deck_frame.set_hexpand(False)
+        deck_frame.set_vexpand(False)
+        deck_center.set_center_widget(deck_frame)
+        deck_box = _box(False, 10)
+        deck_box.set_halign(Gtk.Align.CENTER)
+        deck_box.set_valign(Gtk.Align.CENTER)
+        deck_box.set_margin_top(19)
+        deck_box.set_margin_bottom(15)
+        deck_box.set_margin_start(22)
+        deck_box.set_margin_end(22)
+        deck_frame.set_child(deck_box)
+        # Gtk.Grid / set_size_request() so define minimo: recebendo o espaco
+        # do Paned, cada coluna podia crescer ate ~200 px. Gtk.Fixed dispoe
+        # as teclas por coordenadas, sem distribuir espaco livre aos botoes.
+        self.key_grid = Gtk.Fixed()
+        self.key_grid.set_size_request(5 * DECK_KEY_WIDTH + 4 * DECK_COLUMN_SPACING,
+                                       3 * DECK_KEY_HEIGHT + 2 * DECK_ROW_SPACING)
+        self.key_grid.set_hexpand(False)
+        self.key_grid.set_vexpand(False)
+        self.key_grid.set_halign(Gtk.Align.CENTER)
+        self.key_grid.set_valign(Gtk.Align.CENTER)
+        deck_box.append(self.key_grid)
+        brand = _label('VISION 02', style='vision02-deck-brand')
+        brand.set_halign(Gtk.Align.CENTER)
+        deck_box.append(brand)
+
         self.key_activity_label = _label('Pressione uma tecla física para verificar o destaque.', wrap=True)
+        self.key_activity_label.set_halign(Gtk.Align.CENTER)
         grid_box.append(self.key_activity_label)
         self.key_detail = _label('Selecione uma tecla.', wrap=True)
+        self.key_detail.set_halign(Gtk.Align.CENTER)
         grid_box.append(self.key_detail)
         self._build_quick_properties(editor_split)
         self.key_buttons = {}
         for ident in range(1, 16):
             button = Gtk.Button()
-            button.add_css_class('card')
-            button.set_size_request(117, 142)
+            button.add_css_class('vision02-deck-key')
+            button.set_size_request(DECK_KEY_WIDTH, DECK_KEY_HEIGHT)
+            button.set_hexpand(False)
+            button.set_vexpand(False)
+            button.set_halign(Gtk.Align.START)
+            button.set_valign(Gtk.Align.START)
+            button.set_overflow(Gtk.Overflow.HIDDEN)
             button.connect('clicked', self._key_selected, ident)
-            self.key_grid.attach(button, (ident - 1) % 5, (ident - 1) // 5, 1, 1)
+            col_x, row_y = deck_key_position(ident)
+            self.key_grid.put(button, col_x, row_y)
             self.key_buttons[ident] = button
         self._render_keys()
 
@@ -420,10 +536,16 @@ class StudioWindow(Adw.ApplicationWindow):
         gallery_box.append(self.quick_icon_search)
         self.quick_icon_count = _label('Aguardando biblioteca…', style='caption')
         gallery_box.append(self.quick_icon_count)
+        # v14.2: o catálogo tem até 90 miniaturas. A rolagem interna recebe
+        # altura útil; a galeria também pode ser aberta em janela ampliada.
+        _button(gallery_box, 'Abrir galeria ampliada (90 miniaturas)…',
+                self._open_quick_icon_gallery)
         gallery_scroll = Gtk.ScrolledWindow()
         gallery_scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
-        gallery_scroll.set_min_content_height(200)
-        gallery_scroll.set_size_request(-1, 220)
+        gallery_scroll.set_min_content_height(270)
+        gallery_scroll.set_size_request(-1, 300)
+        gallery_scroll.set_vexpand(True)
+        gallery_scroll.set_propagate_natural_height(False)
         gallery_box.append(gallery_scroll)
         self.quick_icon_flow = Gtk.FlowBox()
         self.quick_icon_flow.set_selection_mode(Gtk.SelectionMode.NONE)
@@ -482,8 +604,19 @@ class StudioWindow(Adw.ApplicationWindow):
         self.quick_preview_btn = _button(footer, 'Pré-visualizar (local)', self._quick_preview)
         self.quick_save_btn = _button(footer, 'Salvar YAML com backup', self._quick_save)
         self.quick_apply_btn = _button(footer, 'Aplicar ao dispositivo (IPC)', self._quick_apply)
-        _button(footer, 'Descartar edição / recarregar', self._quick_discard)
-        _button(footer, 'Editor avançado de aparência…', self._edit_selected_key)
+        discard_btn = _button(footer, 'Descartar edição / recarregar', self._quick_discard)
+        advanced_btn = _button(footer, 'Editor avançado de aparência…', self._edit_selected_key)
+        # v14.2: o rodapé com cinco botões empilhados consumia ~250px,
+        # deixando uma única fileira de ícones visível. Em duas colunas,
+        # todos os comandos permanecem acessíveis e liberam ~100px para abas.
+        footer_buttons = Gtk.Grid(column_spacing=6, row_spacing=6)
+        controls = (self.quick_preview_btn, self.quick_save_btn,
+                    self.quick_apply_btn, discard_btn, advanced_btn)
+        for index, control in enumerate(controls):
+            footer.remove(control)
+            control.set_hexpand(True)
+            footer_buttons.attach(control, index % 2, index // 2, 1, 1)
+        footer.insert_child_after(footer_buttons, self.quick_state)
         footer.append(_label('Salvar não aplica automaticamente. Alterar aba não descarta edições.',
                              style='caption', wrap=True))
         self._quick_kind_changed()
@@ -2571,6 +2704,93 @@ class StudioWindow(Adw.ApplicationWindow):
         # Renderização local: não modifica YAML nem executa ações HID.
         self._quick_preview()
 
+    def _open_quick_icon_gallery(self, *_):
+        """Galeria independente com rolagem: selecionar mantém o fluxo local.
+
+        Não grava perfil, não toca no IPC e não duplica o catálogo no disco.
+        A janela pertence ao Studio; só compartilha o campo de imagem atual.
+        """
+        existing = getattr(self, '_quick_icon_gallery_window', None)
+        if existing is not None:
+            existing.present()
+            return
+        window = Gtk.Window(title='Vision 02 — Galeria de ícones', transient_for=self)
+        window.set_default_size(820, 680)
+        window.set_resizable(True)
+        window.set_destroy_with_parent(True)
+        self._quick_icon_gallery_window = window
+
+        def on_close(*_args):
+            self._quick_icon_gallery_window = None
+            return False
+
+        window.connect('close-request', on_close)
+        frame = _box(False, 10)
+        for side in ('top', 'bottom', 'start', 'end'):
+            getattr(frame, 'set_margin_' + side)(14)
+        window.set_child(frame)
+        frame.append(_label('Galeria de ícones · seleção local', style='title-3'))
+        search = Gtk.SearchEntry()
+        search.set_placeholder_text('Filtrar ícones pelo nome')
+        frame.append(search)
+        count = _label('Carregando…', style='caption')
+        frame.append(count)
+        scroll = Gtk.ScrolledWindow()
+        scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        scroll.set_vexpand(True)
+        frame.append(scroll)
+        flow = Gtk.FlowBox()
+        flow.set_selection_mode(Gtk.SelectionMode.NONE)
+        flow.set_max_children_per_line(6)
+        flow.set_row_spacing(8)
+        flow.set_column_spacing(8)
+        flow.set_halign(Gtk.Align.FILL)
+        scroll.set_child(flow)
+        frame.append(_label('Selecionar um ícone altera somente a prévia local. '
+                            'Para gravar, use Salvar YAML com backup no Studio.',
+                            style='caption', wrap=True))
+
+        def render(*_args):
+            while (child := flow.get_first_child()) is not None:
+                flow.remove(child)
+            matches = filtered_icons(self._icons, search.get_text())
+            count.set_text(f'{len(matches)} miniaturas / {len(self._icons)} ícones no catálogo')
+            selected = self.quick_image.get_text()
+            for icon in matches:
+                path = icon['path']
+                if not Path(path).is_file():
+                    continue
+                button = Gtk.Button()
+                button.add_css_class('flat')
+                button.set_tooltip_text(icon['name'])
+                button.set_sensitive(self._quick_loaded is not None and 'quick_save' not in self._busy)
+                contents = _box(False, 4)
+                contents.set_halign(Gtk.Align.CENTER)
+                picture = Gtk.Picture.new_for_file(Gio.File.new_for_path(path))
+                picture.set_size_request(90, 90)
+                picture.set_content_fit(Gtk.ContentFit.CONTAIN)
+                contents.append(picture)
+                title = _label(icon['name'])
+                title.set_max_width_chars(14)
+                title.set_ellipsize(Pango.EllipsizeMode.END)
+                title.set_halign(Gtk.Align.CENTER)
+                contents.append(title)
+                button.set_child(contents)
+                if path == selected:
+                    button.add_css_class('vision02-icon-selected')
+
+                def choose(_button, chosen=path):
+                    self._quick_pick_icon(_button, chosen)
+                    window.close()
+
+                button.connect('clicked', choose)
+                flow.insert(button, -1)
+
+        search.connect('search-changed', render)
+        search.set_text(self.quick_icon_search.get_text())
+        render()
+        window.present()
+
     def _render_quick_icons(self):
         needle = self.quick_icon_search.get_text()
         matching = filtered_icons(self._icons, needle)
@@ -2758,8 +2978,211 @@ class StudioWindow(Adw.ApplicationWindow):
         page.append(row)
         _button(row, 'Gerenciar perfis', lambda *_: self._launch('perfis'))
         _button(row, 'Recarregar catálogo', lambda *_: self._call('reload'))
+        _button(page, 'Menu de Perfis · Tecla 15',
+                lambda *_: self.stack.set_visible_child_name('profile_menu'))
         page.append(_label('O recarregamento valida os YAML antes de atualizar os LCDs.',
                            style='caption', wrap=True))
+
+    def _build_profile_menu(self):
+        """Administração do menu físico com confirmação, backup e IPC explícitos."""
+        page = self._page(
+            'profile_menu', 'Menu de Perfis',
+            'Configure a tecla 15 de cada perfil para retornar ao menu físico. '
+            'A instalação altera apenas o YAML pessoal e gera ícones locais; '
+            'nenhuma ação física é executada automaticamente.',
+        )
+        page.append(_label('Menu de Perfis · Navegação pelas 15 teclas', style='title-3'))
+        page.append(_label(
+            'O menu existente continuará funcionando. Para incluir novos perfis, inspecione '
+            'as alterações e sincronize. As teclas 1 a 14 permanecem intactas.', wrap=True,
+        ))
+        options = _box(True, 8)
+        page.append(options)
+        self.menu_inspect_button = _button(options, 'Inspecionar catálogo',
+                                           lambda *_: self._menu_run('--plan'))
+        self.menu_reload_button = _button(options, 'Recarregar catálogo (IPC)',
+                                          self._menu_reload)
+        self.menu_open_button = _button(options, 'Abrir menu nos LCDs (IPC)',
+                                        self._menu_open)
+
+        self.menu_status = _label('Clique em Inspecionar catálogo para começar.', wrap=True)
+        page.append(self.menu_status)
+        self.menu_summary = _label('', wrap=True)
+        page.append(self.menu_summary)
+        list_scroll = Gtk.ScrolledWindow()
+        list_scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        list_scroll.set_min_content_height(260)
+        list_scroll.set_size_request(-1, 310)
+        page.append(list_scroll)
+        self.menu_profile_rows = _box(False, 8)
+        list_scroll.set_child(self.menu_profile_rows)
+
+        self.menu_confirm = Gtk.CheckButton(label=(
+            'Confirmo que a função atual da tecla 15 dos perfis será substituída '
+            'por Voltar ao Menu (backup automático).'))
+        self.menu_confirm.set_active(False)
+        self.menu_confirm.connect('toggled', lambda *_: self._menu_update_controls())
+        page.append(self.menu_confirm)
+        actions = _box(True, 8)
+        page.append(actions)
+        self.menu_sync_button = _button(actions, 'Sincronizar menu e tecla 15',
+                                        lambda *_: self._menu_run('--apply'))
+        self.menu_restore_button = _button(actions, 'Restaurar último backup…',
+                                           self._menu_restore_request)
+        page.append(_label(
+            'Depois de sincronizar, clique em Recarregar catálogo (IPC). '
+            'A abertura do menu é uma ação separada. Nenhum serviço é reiniciado.',
+            style='caption', wrap=True,
+        ))
+        self._menu_update_controls()
+
+    def _menu_update_controls(self):
+        busy = self._menu_busy
+        editable = not self._quick_dirty
+        self.menu_inspect_button.set_sensitive(not busy)
+        self.menu_sync_button.set_sensitive(
+            not busy and editable and self._menu_plan is not None
+            and self.menu_confirm.get_active()
+        )
+        self.menu_confirm.set_sensitive(not busy and editable and self._menu_plan is not None)
+        self.menu_restore_button.set_sensitive(not busy and editable)
+        self.menu_reload_button.set_sensitive(not busy and self._connected)
+        self.menu_open_button.set_sensitive(not busy and self._connected and editable)
+
+    def _menu_render_plan(self, response):
+        box = self.menu_profile_rows
+        child = box.get_first_child()
+        while child is not None:
+            sibling = child.get_next_sibling()
+            box.remove(child)
+            child = sibling
+        root = Path(os.environ.get('XDG_CONFIG_HOME') or (Path.home() / '.config'))
+        icons = root / 'vision02/profile-icons/menu-de-perfis'
+        for index, item in enumerate(response.get('profiles', []), start=1):
+            row = _box(True, 12)
+            image = icons / f'perfil-{index:02d}.png'
+            if image.is_file() and not image.is_symlink():
+                picture = Gtk.Picture.new_for_file(Gio.File.new_for_path(str(image)))
+                picture.set_size_request(48, 48)
+                picture.set_content_fit(Gtk.ContentFit.CONTAIN)
+                row.append(picture)
+            row.append(_label(
+                f"{index:02d}  ·  {item['name']}   |   tecla 15: "
+                f"{item['key15_before']}  →  Menu de Perfis", wrap=True,
+            ))
+            box.append(row)
+        count = response.get('count', 0)
+        pages = len(response.get('pages') or [])
+        changes = response.get('files_to_write', 0)
+        self.menu_summary.set_text(
+            f'{count} perfis identificados · {pages} página(s) · '
+            f'{changes} arquivo(s) pendente(s) de sincronização.'
+        )
+
+    def _menu_run(self, operation, backup=None):
+        if self._menu_busy:
+            return
+        if operation in ('--apply', '--restore') and self._quick_dirty:
+            self.menu_status.set_text('Salve ou descarte a edição da tecla antes de modificar os perfis.')
+            return
+        revision = None
+        if operation == '--apply':
+            if not self._menu_plan or not self.menu_confirm.get_active():
+                self.menu_status.set_text('Inspecione os perfis e confirme a substituição da tecla 15.')
+                return
+            revision = self._menu_plan['revision']
+        self._menu_busy = True
+        self._menu_update_controls()
+        self.menu_status.set_text('Verificando perfis; aguarde…')
+
+        def worker():
+            command = [str(PYTHON), '-m', 'vision02.studio_profile_menu_v15',
+                       '--project', str(ROOT)]
+            if revision is not None:
+                command.extend(['--expected-revision', revision])
+            command.append(operation)
+            if backup is not None:
+                command.append(str(backup))
+            environment = os.environ.copy()
+            environment['PYTHONPATH'] = str(ROOT / 'src') + os.pathsep + environment.get('PYTHONPATH', '')
+            try:
+                result = subprocess.run(command, cwd=str(ROOT), env=environment,
+                                        capture_output=True, text=True, timeout=120, check=False)
+                response = json.loads(result.stdout)
+                if not isinstance(response, dict):
+                    raise ValueError('Resposta inválida do gerenciador de perfis')
+                if result.returncode or not response.get('ok'):
+                    raise ValueError(response.get('error') or result.stderr.strip() or 'Falha na operação')
+            except (OSError, subprocess.SubprocessError, ValueError, json.JSONDecodeError) as exc:
+                GLib.idle_add(self._menu_finished, operation, False, str(exc))
+            else:
+                GLib.idle_add(self._menu_finished, operation, True, response)
+
+        threading.Thread(target=worker, daemon=True, name='vision02-menu-perfis').start()
+
+    def _menu_finished(self, operation, ok, result):
+        self._menu_busy = False
+        if self._closed:
+            return False
+        if not ok:
+            self._menu_plan = None
+            self.menu_confirm.set_active(False)
+            self.menu_status.set_text('Falha: ' + str(result))
+        elif operation == '--plan':
+            self._menu_plan = result
+            self.menu_confirm.set_active(False)
+            self._menu_render_plan(result)
+            self.menu_status.set_text('Inspeção concluída. Revise a lista e confirme antes de sincronizar.')
+        else:
+            self._menu_plan = None
+            self.menu_confirm.set_active(False)
+            message = result.get('message', 'Operação concluída.')
+            if operation == '--apply':
+                message += ' Clique em Recarregar catálogo (IPC) para atualizar o dispositivo.'
+            self.menu_status.set_text(message)
+        self._menu_update_controls()
+        return False
+
+    def _menu_reload(self, *_):
+        if not self._menu_busy:
+            self._call('reload')
+            self.menu_status.set_text('Recarregamento IPC solicitado. Aguarde a atualização do catálogo.')
+
+    def _menu_open(self, *_):
+        if self._quick_dirty:
+            self.menu_status.set_text('Salve ou descarte a edição da tecla antes de trocar de perfil.')
+            return
+        if not self._menu_busy and self._connected:
+            self._call('switch', target='Menu de Perfis')
+            self.menu_status.set_text('Abertura do Menu de Perfis solicitada por IPC.')
+
+    def _menu_restore_request(self, *_):
+        if self._menu_busy or self._quick_dirty:
+            return
+        state = Path(os.environ.get('XDG_STATE_HOME') or (Path.home() / '.local/state'))
+        backup_root = state / 'vision02/menu-perfis-backups'
+        backups = sorted(backup_root.glob('*/manifest.json'), reverse=True) if backup_root.is_dir() else []
+        if not backups:
+            self.menu_status.set_text('Nenhum backup anterior do Menu de Perfis foi encontrado.')
+            return
+        backup = backups[0].parent
+        dialog = Gtk.AlertDialog()
+        dialog.set_message('Restaurar a configuração anterior da tecla 15?')
+        dialog.set_detail(
+            f'Backup: {backup}\nA operação será recusada se algum arquivo foi alterado '
+            'depois da instalação. Recarregue o catálogo após restaurar.'
+        )
+        dialog.set_buttons(['Cancelar', 'Restaurar'])
+
+        def answered(alert, result):
+            try:
+                choice = alert.choose_finish(result)
+            except GLib.Error:
+                return
+            if choice == 1:
+                self._menu_run('--restore', backup)
+
+        dialog.choose(self, None, answered)
 
     def _build_icons(self):
         page = self._page('icons', 'Ícones',
@@ -2934,6 +3357,8 @@ class StudioWindow(Adw.ApplicationWindow):
             self._update_combo()
             self._render_profiles()
             self._render_keys()
+            if self.stack.get_visible_child_name() == 'profile_menu':
+                self._menu_update_controls()
             state = ('Conectada' if self._connected else 'USB desconectado')
             self.top_status.set_text(f'Vision 02 · {state} · {self._current or "—"}')
             self.dashboard_state.set_text(f'Dispositivo: {state}  |  Perfil ativo: {self._current or "—"}')
@@ -3103,7 +3528,10 @@ class StudioWindow(Adw.ApplicationWindow):
                 button.remove_css_class('vision02-key-selected')
             number_label = self._key_number_labels.get(ident)
             if number_label is not None:
-                number_label.set_text(f'{ident:02d}' + (' • SELECIONADA' if ident == self._selected_key else ''))
+                # Nomes longos aumentam a largura natural do Gtk.Button.
+                # A borda selecionada e o painel de detalhes ja comunicam
+                # a selecao; manter apenas o numero evita sobrepor vizinhos.
+                number_label.set_text(f'{ident:02d}')
             status_label = self._key_status_labels.get(ident)
             if status_label is not None:
                 status_label.set_text('PRESSIONADA' if physical_pressed else 'RECENTE' if recent else '')
@@ -3125,7 +3553,7 @@ class StudioWindow(Adw.ApplicationWindow):
         self._key_status_labels = {}
         for key_id, button in self.key_buttons.items():
             item = keys.get(key_id, {})
-            cell = _box(False, 3)
+            cell = _box(False, 1)
             cell.set_halign(Gtk.Align.CENTER)
             png = item.get('image')
             live_path = self._live_images.get(str(key_id)) if self._live_active == self._current else None
@@ -3139,19 +3567,19 @@ class StudioWindow(Adw.ApplicationWindow):
                 except (OSError, GLib.Error, ValueError):
                     pass
             if live_picture is not None:
-                live_picture.set_size_request(92, 92)
+                live_picture.set_size_request(DECK_ICON_SIZE, DECK_ICON_SIZE)
                 live_picture.set_content_fit(Gtk.ContentFit.CONTAIN)
                 cell.append(live_picture)
             elif isinstance(png, str) and Path(png).is_file():
                 picture = Gtk.Picture.new_for_file(Gio.File.new_for_path(png))
-                picture.set_size_request(92, 92)
+                picture.set_size_request(DECK_ICON_SIZE, DECK_ICON_SIZE)
                 picture.set_content_fit(Gtk.ContentFit.CONTAIN)
                 cell.append(picture)
             else:
                 blank = _label('—')
-                blank.set_size_request(92, 92)
+                blank.set_size_request(DECK_ICON_SIZE, DECK_ICON_SIZE)
                 cell.append(blank)
-            title = _label(f'{key_id:02d}')
+            title = _label(f'{key_id:02d}', style='vision02-key-number')
             title.set_halign(Gtk.Align.CENTER)
             cell.append(title)
             self._key_number_labels[key_id] = title
@@ -3212,6 +3640,8 @@ class StudioWindow(Adw.ApplicationWindow):
         if key == 'keys':
             self._call('previews')
             self._call('live_preview')
+        elif key == 'profile_menu':
+            self._menu_run('--plan')
         elif key == 'icons':
             self._call('icons')
         elif key == 'system':
@@ -3290,6 +3720,10 @@ class StudioWindow(Adw.ApplicationWindow):
         if self._panel_save_timer:
             GLib.source_remove(self._panel_save_timer)
             self._persist_panel_width()
+        try:
+            save_window_size(self.get_width(), self.get_height())
+        except (OSError, ValueError) as exc:
+            print(f'Vision 02 Studio: não foi possível guardar a janela: {exc}', file=sys.stderr)
         self._closed = True
         if self._preview_timer:
             GLib.source_remove(self._preview_timer)

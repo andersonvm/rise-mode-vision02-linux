@@ -1,0 +1,164 @@
+version: 1
+name: OpenBoard
+keys:
+  1:
+    label: Abrir OpenBoard
+    image: ../profile-icons/openboard/01-launch.png
+    action:
+      type: script
+      path: ../profile-tools/launch-openboard.sh
+      interpreter: bash
+      args: []
+    appearance:
+      background: '#091F2B'
+      show_text: false
+  2:
+    label: Caneta
+    image: ../profile-icons/openboard/02-pen.png
+    action:
+      type: hotkey
+      keys:
+      - ctrl
+      - p
+    appearance:
+      background: '#091F2B'
+      show_text: false
+  3:
+    label: Borracha
+    image: ../profile-icons/openboard/03-eraser.png
+    action:
+      type: hotkey
+      keys:
+      - ctrl
+      - e
+    appearance:
+      background: '#091F2B'
+      show_text: false
+  4:
+    label: Marca-texto
+    image: ../profile-icons/openboard/04-marker.png
+    action:
+      type: hotkey
+      keys:
+      - ctrl
+      - m
+    appearance:
+      background: '#091F2B'
+      show_text: false
+  5:
+    label: Selecionar
+    image: ../profile-icons/openboard/05-select.png
+    action:
+      type: hotkey
+      keys:
+      - ctrl
+      - f
+    appearance:
+      background: '#091F2B'
+      show_text: false
+  6:
+    label: Texto
+    image: ../profile-icons/openboard/06-text.png
+    action:
+      type: hotkey
+      keys:
+      - ctrl
+      - k
+    appearance:
+      background: '#091F2B'
+      show_text: false
+  7:
+    label: Ponteiro laser
+    image: ../profile-icons/openboard/07-laser.png
+    action:
+      type: hotkey
+      keys:
+      - ctrl
+      - g
+    appearance:
+      background: '#091F2B'
+      show_text: false
+  8:
+    label: Desfazer
+    image: ../profile-icons/openboard/08-undo.png
+    action:
+      type: hotkey
+      keys:
+      - ctrl
+      - z
+    appearance:
+      background: '#091F2B'
+      show_text: false
+  9:
+    label: Refazer
+    image: ../profile-icons/openboard/09-redo.png
+    action:
+      type: hotkey
+      keys:
+      - ctrl
+      - y
+    appearance:
+      background: '#091F2B'
+      show_text: false
+  10:
+    label: Nova página
+    image: ../profile-icons/openboard/10-new.png
+    action:
+      type: hotkey
+      keys:
+      - insert
+    appearance:
+      background: '#091F2B'
+      show_text: false
+  11:
+    label: Página anterior
+    image: ../profile-icons/openboard/11-prev.png
+    action:
+      type: hotkey
+      keys:
+      - left
+    appearance:
+      background: '#091F2B'
+      show_text: false
+  12:
+    label: Próxima página
+    image: ../profile-icons/openboard/12-next.png
+    action:
+      type: hotkey
+      keys:
+      - right
+    appearance:
+      background: '#091F2B'
+      show_text: false
+  13:
+    label: Modo quadro
+    image: ../profile-icons/openboard/13-board.png
+    action:
+      type: hotkey
+      keys:
+      - ctrl
+      - b
+    appearance:
+      background: '#091F2B'
+      show_text: false
+  14:
+    label: Modo desktop
+    image: ../profile-icons/openboard/14-desktop.png
+    action:
+      type: hotkey
+      keys:
+      - ctrl
+      - shift
+      - h
+    appearance:
+      background: '#091F2B'
+      show_text: false
+  15:
+    label: Menu de Perfis
+    image: ../profile-icons/menu-de-perfis/voltar-menu.png
+    action:
+      type: profile
+      target: Menu de Perfis
+    appearance:
+      background: '#192431'
+      show_text: false

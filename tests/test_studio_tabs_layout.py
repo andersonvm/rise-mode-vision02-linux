@@ -129,7 +129,7 @@ def test_global_appearance_toggle_reaches_both_pages():
 
 
 def test_editor_divider_restores_and_saves_preference():
-    assert 'editor_split.set_position(load_panel_width())' in body('_build_keys')
+    assert 'editor_split.set_position(max(load_panel_width(), 660))' in body('_build_keys')
     assert "editor_split.connect('notify::position', self._panel_position_changed)" in body('_build_keys')
     assert 'save_panel_width(self.editor_split.get_position())' in body('_persist_panel_width')
     assert 'self._persist_panel_width()' in body('_on_close')
