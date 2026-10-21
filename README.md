@@ -1,264 +1,150 @@
-# Rise Mode Vision 02 Linux — Studio GTK4 e controlador USB/HID
+# Rise Mode Vision 02 Linux
 
-**Projeto independente de software oficial** para controlar e personalizar o **Rise Mode Vision 02** no Linux, com **15 teclas programáveis e displays LCD individuais**. Desenvolvido e testado no Ubuntu, integra um controlador USB/HID em Python, serviço de supervisão, perfis YAML, ações, integração OBS Studio e uma interface gráfica **Vision 02 Studio** baseada em GTK4/libadwaita.
+**Vision02 Studio v1.0.0 — primeira versão estável.** Aplicativo independente para Linux que controla as **15 teclas físicas com LCDs individuais (100 × 100 px)** do Rise Mode Vision 02. Inclui interface gráfica GTK4/libadwaita, perfis configuráveis, integração OBS Studio e controlador USB/HID supervisionado.
 
-## Instalação por pacote Debian (Ubuntu 24.04+)
+[**Baixar v1.0.0 (.deb)**](https://github.com/andersonvm/rise-mode-vision02-linux/releases/tag/v1.0.0) · [Última release](https://github.com/andersonvm/rise-mode-vision02-linux/releases/latest) · [Instalação detalhada](docs/instalacao-deb.md) · [Documentação do Studio](docs/vision02-studio.md)
 
-**[Baixar a última versão estável (.deb) — GitHub Releases](https://github.com/andersonvm/rise-mode-vision02-linux/releases/latest)**
+> Projeto comunitário de engenharia reversa, **não oficial e não afiliado à Rise Mode**. Validado em hardware real no Ubuntu. A numeração pública recomeçou em v1.0.0; a antiga [v15.0.0](https://github.com/andersonvm/rise-mode-vision02-linux/releases/tag/v15.0.0) foi preservada apenas como histórico.
 
-Na página da versão, abra **Assets**, baixe o arquivo `vision02-studio-desktop_1.0.0-1_all.deb` (ou a versão mais recente) e instale com o gerenciador de pacotes do Ubuntu:
+## Instalação rápida — Ubuntu 24.04+
+
+Baixe os dois arquivos nos *Assets* da [release v1.0.0](https://github.com/andersonvm/rise-mode-vision02-linux/releases/tag/v1.0.0):
+
+- `vision02-studio-desktop_1.0.0-1_all.deb`
+- `SHA256SUMS`
+
+Na pasta onde foram baixados:
 
 ```bash
-sudo apt install ./vision02-studio-desktop_*_all.deb
+sha256sum -c SHA256SUMS
+sudo apt install ./vision02-studio-desktop_1.0.0-1_all.deb
 ```
 
-O pacote inclui o Studio e as bibliotecas do projeto, instala o atalho no menu do Ubuntu e resolve as dependências Python/GTK pelo `apt`. **Não ativa automaticamente o serviço HID**, não altera seus perfis pessoais e não substitui configurações OBS. Para operar os LCDs, configure o controlador com IPC; consulte o [guia de instalação Debian](docs/instalacao-deb.md).
+O pacote instala a GUI e seus componentes em `/opt/vision02-studio/`, além do atalho **Vision 02 Studio** e dos comandos `vision02-studio-launch` e `vision02-studio-control`. Para iniciar:
 
-> **Versão estável:** **v1.0.0**, primeira baseline funcional validada no Ubuntu. A numeração pública foi reiniciada; a release histórica `v15.0.0` permanece disponível. O pacote Python também utiliza `1.0.0` em `pyproject.toml`. Projeto comunitário, sem afiliação ao fabricante.
+```bash
+vision02-studio-launch
+```
 
-## O que já funciona
+**Importante:** o `.deb` **não instala nem ativa automaticamente o serviço HID**. Um controlador já ativo, com IPC habilitado, é necessário para modificar as teclas. A GUI pode abrir sem o equipamento conectado, mas não conseguirá aplicar comandos ao hardware. Veja [serviço e hotplug](docs/hotplug.md), [IPC](docs/ipc.md) e [instalação Debian](docs/instalacao-deb.md). O instalador preserva perfis pessoais e configurações OBS.
 
-| Área | Funcionalidades |
+Se você usou um pacote experimental `16.0.0~rc1-1`, o APT considerará `1.0.0-1` um **downgrade numérico**. A v1.0.0 é a nova linha estável; revise essa operação antes de confirmá-la.
+
+## Funcionalidades
+
+| Área | Recursos disponíveis |
 | --- | --- |
-| **Hardware USB/HID** | Detecção da Vision 02 (VID:PID `0a00:1000`) por sysfs/`hidraw`, leitura das 15 teclas, envio de imagens JPEG aos 15 LCDs e cache de imagens |
-| **LCDs e brilho** | Inicialização em lote dos 15 LCDs sem bordas brancas; brilho global de 0% a 100% por CLI ou Studio, com persistência e restauração após reconexão. |
-| **Ciclo de vida** | Sessão HID persistente, serialização de escrita, tratamento de falhas e supervisor de desconexão/reconexão com espera progressiva |
-| **Vision 02 Studio** | Interface GTK4/libadwaita com painel de controle, edição visual de teclas, perfis, ícones, estado do sistema e integração OBS |
-| **Editor visual** | Grade física **5 × 3 compacta**, seleção de teclas, abas **Ação / Imagem / Texto / Composição**, pré-visualização, salvamento com backup e aplicação via IPC |
-| **Imagens e presets** | Galeria de **90 miniaturas**, janela de galeria ampliada, importação de ícones, composição visual com camadas, posicionamento, escala e editor interativo de presets |
-| **Perfis** | Perfis YAML, criação/duplicação/renomeação, troca pelo equipamento ou IPC, catálogo dinâmico, recarregamento sem reiniciar o controlador e persistência do último perfil |
-| **Menu de Perfis (Studio v15)** | Seleção de perfis diretamente nos LCDs; **tecla física 15** retorna ao menu; até 14 perfis por página, com paginação, backup e restauração |
-| **Ações** | Comandos, URLs, scripts, atalhos de teclado, troca de perfis e operações de OBS WebSocket |
-| **OBS Studio** | Cenas, gravação, transmissão, áudio, câmera virtual, buffer de replay e indicadores de estado, com autenticação configurada fora do Git |
+| **Hardware** | Descoberta USB/HID por VID:PID `0a00:1000`, 15 teclas físicas e 15 LCDs 100 × 100, imagens JPEG e cache seletivo |
+| **Inicialização dos LCDs** | Sequência em lote `CLE FF` → 15 JPEGs → `STP` único, validada sem bordas brancas após inicialização a frio |
+| **Brilho** | Controle **global** de 0 a 100% dos 15 LCDs pelo Studio e CLI, com preferência persistente e restauração ao reconectar |
+| **Vision02 Studio** | Painel GTK4/libadwaita, grade física 5 × 3, propriedades por tecla, abas Ação / Imagem / Texto / Composição |
+| **Edição visual** | Preview dos LCDs, composição de imagens e texto, galeria de ícones, presets e aplicação via IPC |
+| **Perfis** | Catálogo pessoal YAML, criação, duplicação, renomeação, seleção e troca de perfis com persistência do último perfil |
+| **Menu de Perfis** | Navegação pelos perfis nos LCDs; tecla 15 como acesso/retorno ao menu, com paginação |
+| **Ações e integrações** | Comandos, URLs, scripts, atalhos, troca de perfil, OBS WebSocket 5.x e indicadores do sistema |
+| **Confiabilidade** | Sessão HID persistente, serialização de operações, supervisor de conexão USB, recuperação após reconexão e IPC Unix local |
 
-### Interface do equipamento
+### Ajustar o brilho
 
-A interface **Teclas** mostra os 15 botões agrupados em cinco colunas e três linhas, com tamanho fixo e centralização. O Studio abre maximizado, mantendo os controles de janela do ambiente gráfico. No painel direito, a galeria de miniaturas possui rolagem própria e pode ser aberta em uma janela maior.
+No **Studio → Configurações → Brilho das teclas LCD (global)**, selecione um percentual e clique em **Aplicar brilho**.
 
-As alterações na interface **não** acionam automaticamente o hardware. Inspecionar, pré-visualizar, salvar o YAML e **Aplicar ao dispositivo (IPC)** são operações distintas.
+Com o serviço em execução, também é possível usar o terminal:
+
+```bash
+vision02-studio-control control brightness       # Consultar
+vision02-studio-control control brightness 60    # Aplicar 60%
+vision02-studio-control control brightness 100   # Aplicar 100%
+```
+
+O brilho é aplicado **aos 15 LCDs simultaneamente**, não individualmente. A preferência fica em `~/.config/vision02/brightness.json` (ou `XDG_CONFIG_HOME`). Se os LCDs forem apagados com 0%, recupere pelo comando `control brightness 25`. [Protocolo e detalhes](docs/brilho-lcd.md).
+
+### Perfis e Menu de Perfis
+
+Os perfis pessoais são armazenados em `~/.config/vision02/profiles/`. No Studio, acesse **Menu de Perfis**, inspecione o catálogo e revise a configuração da **tecla 15** antes de sincronizar: a sincronização substitui sua ação anterior nos perfis incluídos, com backup para restauração. Depois utilize **Recarregar catálogo (IPC)** e **Abrir menu nos LCDs (IPC)**.
+
+Há um [perfil de exemplo para OpenBoard](docs/perfil-openboard.md), incluindo ícones e atalhos. Aplicativos como OpenBoard e OBS devem estar instalados/configurados separadamente.
 
 ## Arquitetura
 
 ```text
-┌───────────────────────────────────────────────┐
-│ Vision 02 Studio (GTK4 / libadwaita)          │
-│ Teclas · Perfis · Menu de Perfis · Ícones     │
-│ OBS Studio · Sistema · Configurações          │
-└──────────────────────┬────────────────────────┘
-                       │ backend / socket IPC local
-                       ▼
-          Serviço controlador Vision 02
-          Python · perfis YAML · fila de ações
-                       │
-           Supervisor hotplug (systemd --user)
-                       │
-                       ▼
-              Linux hidraw / USB HID
-                       │
-                       ▼
-             Rise Mode Vision 02
-             15 teclas / 15 LCDs
+Vision02 Studio (GTK4/libadwaita)
+   │
+   ├── Editor, perfis, imagens, OBS e brilho
+   │
+   ▼
+Backend do Studio → socket IPC Unix
+   │
+   ▼
+Controlador Vision02 (único proprietário do HID)
+   │
+   ▼
+Supervisor hotplug / serviço systemd --user
+   │
+   ▼
+Linux hidraw → Rise Mode Vision 02 (15 teclas / 15 LCDs)
 ```
 
-O **processo controlador é o único proprietário do USB/HID**. O Studio e os clientes da CLI utilizam o socket IPC local para consultar o estado, trocar perfis, recarregar o catálogo e aplicar alterações. Isso evita conexões HID concorrentes entre a GUI e o serviço.
+**Não execute uma segunda instância que abra `/dev/hidraw*` enquanto o serviço controla o dispositivo.** A GUI e os comandos `control` comunicam-se com o processo existente via IPC; a VM Windows/VirtualBox também não pode possuir o dispositivo ao mesmo tempo.
 
-O supervisor em `src/vision02/hotplug.py` detecta a conexão e a desconexão e reinicia o controlador quando necessário. Ele não repete indiscriminadamente transmissões JPEG com falha.
+Verificações úteis com o serviço já configurado:
 
-## Requisitos
+```bash
+systemctl --user is-active vision02.service
+journalctl --user -u vision02.service -n 40 --no-pager
+vision02-studio-control control status
+vision02-studio-control control profiles
+vision02-studio-control control reload
+```
 
-- Linux com interface `hidraw` e dispositivo Rise Mode Vision 02 (`0a00:1000`);
-- Python **3.10+**;
-- GTK4, libadwaita e PyGObject para as interfaces gráficas;
-- Pillow e PyYAML para perfis e imagens;
-- Sessão gráfica GNOME/Wayland ou ambiente GTK compatível;
-- Acesso ao `/dev/hidraw*` do dispositivo por permissões de usuário/`udev`.
+O `reload` relê os perfis sem abrir outra sessão HID. Para criar e configurar o serviço pela primeira vez, consulte a [documentação de hotplug](docs/hotplug.md) e o [exemplo de unidade](packaging/systemd/vision02.service): os caminhos precisam ser adaptados à instalação. **Não copie o exemplo sem conferir `WorkingDirectory` e `ExecStart`.**
 
-**Importante:** o dispositivo não pode estar sob controle simultâneo do VirtualBox, de outra máquina virtual ou de outro processo que tente utilizar o HID.
+## Desenvolvimento a partir do código-fonte
 
-## Instalação a partir do código-fonte (Ubuntu)
-
-Instale as dependências do sistema:
+Requer Python 3.10+, Pillow, PyYAML, GTK4, libadwaita, PyGObject e acesso ao dispositivo `hidraw`. No Ubuntu, instale as dependências de sistema e crie um ambiente virtual:
 
 ```bash
 sudo apt update
-sudo apt install -y \
-  git python3 python3-venv python3-pip \
+sudo apt install -y git python3 python3-venv python3-pip \
   python3-gi gir1.2-gtk-4.0 gir1.2-adw-1
-```
 
-Clone o projeto e prepare o ambiente virtual:
-
-```bash
 git clone https://github.com/andersonvm/rise-mode-vision02-linux.git
 cd rise-mode-vision02-linux
-
-python3 -m venv .venv
-.venv/bin/python -m pip install --upgrade pip
+python3 -m venv --system-site-packages .venv
 .venv/bin/python -m pip install -e '.[dev,wayland]'
-```
-
-O script do Studio usa `/usr/bin/python3` para acessar o GTK instalado pelo sistema, enquanto o backend utiliza a `.venv` para as dependências Python. **Mantenha os dois ambientes disponíveis.**
-
-### Abrir o Vision 02 Studio
-
-```bash
 ./scripts/vision02-studio
 ```
 
-Outras ferramentas gráficas presentes no repositório:
+O launcher local do Studio utiliza o Python do sistema para GTK4; o backend utiliza a instalação Python correspondente. O funcionamento de funcionalidades específicas exige as dependências externas aplicáveis (OBS, OpenBoard, autorização do portal Wayland ou `xdotool` no X11).
 
-```bash
-./scripts/vision02-profiles     # Gerenciador de perfis
-./scripts/vision02-editor      # Editor de teclas
-./scripts/vision02-gui         # Painel gráfico
-./scripts/vision02-obs-panel   # Painel OBS
-```
-
-Os atalhos do menu de aplicativos do Ubuntu e o **Gerenciador de Atualizações** fazem parte de instaladores desktop distribuídos separadamente; **não são criados automaticamente** pelo comando `pip install -e .`.
-
-### Serviço e conexão USB
-
-O projeto possui exemplo de unidade em [`packaging/systemd/vision02.service`](packaging/systemd/vision02.service). Antes de ativá-la, **ajuste os caminhos de `WorkingDirectory` e `ExecStart`** para a instalação real e configure o carregamento do catálogo de perfis.
-
-Se o serviço já estiver instalado:
-
-```bash
-systemctl --user status vision02.service
-journalctl --user -u vision02.service -f
-.venv/bin/vision02 control status
-```
-
-Não execute um segundo `vision02 profile run`, `vision02 listen` ou outro cliente que abra `hidraw` diretamente enquanto o serviço controla o dispositivo. Para depuração direta, interrompa primeiro o serviço.
-
-Consulte [supervisão USB](docs/hotplug.md), [IPC](docs/ipc.md) e [gerenciamento de perfis](docs/gerenciamento-perfis.md).
-
-## Como utilizar os perfis e o Menu de Perfis
-
-Os perfis pessoais ficam em:
-
-```text
-~/.config/vision02/profiles/
-```
-
-No **Vision 02 Studio → Menu de Perfis**:
-
-1. Clique em **Inspecionar catálogo** para ver os perfis disponíveis.
-2. Revise a função atual da tecla 15 e confirme a substituição.
-3. Clique em **Sincronizar menu e tecla 15**. O Studio cria backup antes de gravar os YAML.
-4. Clique em **Recarregar catálogo (IPC)**.
-5. Clique em **Abrir menu nos LCDs (IPC)** ou pressione a tecla 15 de um perfil.
-
-Nos perfis comuns, a tecla 15 retorna ao **Menu de Perfis**. Dentro do menu, as teclas selecionam os perfis; quando houver mais de 14 opções, a tecla 15 controla a paginação. **Adicionar um novo perfil requer nova sincronização do menu** — a inclusão não ocorre automaticamente.
-
-Backups do menu: `~/.local/state/vision02/menu-perfis-backups/`.
-
-> A sincronização substitui a função anterior da tecla 15 nos perfis incluídos. As demais teclas são preservadas. Existe opção de restauração do último backup na interface.
-
-Documentação: [Menu de Perfis v15](docs/studio-menu-perfis-v15.md).
-
-### Perfil OpenBoard
-
-O projeto inclui um exemplo completo para o **OpenBoard**, com YAML, script de abertura e **15 ícones PNG**:
-
-- [Perfil YAML](examples/profiles/openboard.yaml)
-- [Ícones](examples/profile-icons/openboard/)
-- [Script de abertura](examples/profile-tools/launch-openboard.sh)
-- [Manual do perfil](docs/perfil-openboard.md)
-
-As teclas 1–14 fornecem funções como caneta, borracha, marca-texto, seleção, texto, desfazer/refazer e navegação. A **tecla 15** retorna ao Menu de Perfis. Os atalhos dependem da versão do OpenBoard e de a janela correta estar em foco.
-
-**O arquivo de exemplo no Git não é instalado automaticamente no perfil pessoal.** Siga o [manual de instalação do OpenBoard](docs/perfil-openboard.md) e depois sincronize o Menu de Perfis no Studio para exibi-lo nos LCDs.
-
-## CLI e IPC
-
-Exemplos de comandos seguros para consultar a instância em execução:
-
-```bash
-.venv/bin/vision02 control status
-.venv/bin/vision02 control profiles
-.venv/bin/vision02 control switch 'OpenBoard'
-.venv/bin/vision02 control reload
-```
-
-O comando `switch` exige que o perfil já tenha sido carregado no catálogo. `reload` valida e aplica as alterações sem abrir uma nova conexão USB.
-
-Para inspecionar ou validar configurações:
-
-```bash
-.venv/bin/vision02 discover
-.venv/bin/vision02 mapping
-.venv/bin/vision02 profile validate examples/profiles/openboard.yaml
-```
-
-A API Python permanece disponível:
-
-```python
-from vision02 import Vision02
-
-with Vision02() as controller:
-    controller.set_image_for_key(1, "terminal.png")
-    controller.on_press(1, lambda key: print(key))
-    controller.run()
-```
-
-**Não use essa API de acesso direto em paralelo com o serviço ativo.**
-
-## Ações, Wayland e OBS
-
-Os perfis suportam ações `command`, `url`, `script`, `hotkey`, `profile` e `obs`.
-
-- **GNOME Wayland:** atalhos utilizam o portal `org.freedesktop.portal.RemoteDesktop`; pode ser necessária autorização interativa. O extra `.[wayland]` instala `dbus-next`.
-- **X11:** os atalhos podem utilizar `xdotool` (instalação à parte).
-- **OBS WebSocket 5.x:** configure autenticação no OBS e armazene os dados localmente em `~/.config/vision02/obs.json`, com permissões restritas. **Nunca publique senhas no Git.**
-
-Consulte [ações e atalhos](docs/acoes.md) e [integração OBS WebSocket](docs/integracao-obs-websocket.md).
-
-## Testes
+### Testes e build Debian
 
 ```bash
 .venv/bin/python -m pytest -q
+python3 packaging/debian/build_deb.py --version 1.0.0 --output dist
 ```
 
-**Validação da baseline v1.0.0:** testes automatizados executados em uma árvore limpa do projeto; confira o resultado do CI da release para a contagem final.
+Na consolidação da v1.0.0, **1.602 testes passaram** na árvore integrada e novamente em uma cópia Git limpa. O [GitHub Actions da v1.0.0](https://github.com/andersonvm/rise-mode-vision02-linux/actions) validou testes, conteúdo e instalação do pacote no Ubuntu 24.04. Os testes automatizados não substituem a verificação física: a ausência de bordas brancas após desligamento completo e o controle/persistência de brilho foram confirmados no equipamento.
 
-Os testes automatizados cobrem lógica de perfis, interface, composição de imagens, comunicação simulada, sessão HID, concorrência e integração IPC. **Testes com mocks não substituem testes físicos nos 15 LCDs e na sessão gráfica do Ubuntu.**
+A distribuição pública é gerada **a partir de commits versionados**, sem incorporar YAMLs pessoais, credenciais OBS nem scripts locais de diagnóstico. Releases estáveis são publicadas por tags `vMAJOR.MINOR.PATCH`; a [v1.0.0](https://github.com/andersonvm/rise-mode-vision02-linux/releases/tag/v1.0.0) é a primeira da nova numeração.
 
-## Organização do repositório
+## Estrutura e documentação
 
 ```text
-apps/                   Aplicações GTK4 e backends
-src/vision02/           Controlador, perfis, ações, IPC, OBS e Studio
-scripts/                Launchers das interfaces e ferramentas
-examples/profiles/      Exemplos de perfis YAML
-examples/profile-icons/ Ícones de exemplos, incluindo OpenBoard
-examples/profile-tools/ Scripts de ações dos perfis
-packaging/systemd/      Exemplo de unidade do controlador
-docs/                   Documentação por funcionalidade e versões do Studio
+apps/                   Studio GTK4 e backends
+src/vision02/           Protocolo, HID, brilho, IPC, perfis e OBS
+scripts/                Inicializadores e ferramentas gráficas
+examples/               Perfis, ícones e scripts de exemplo
+packaging/              Pacote Debian e exemplo de serviço
+docs/                   Manuais e protocolos
 tests/                  Testes automatizados
 ```
 
-## Limitações técnicas e cuidados
+Consulte a documentação por área: [Studio](docs/vision02-studio.md) · [Brilho dos LCDs](docs/brilho-lcd.md) · [Inicialização sem bordas](docs/lcd-inicializacao-lote-windows.md) · [Perfis](docs/gerenciamento-perfis.md) · [Menu de Perfis](docs/studio-menu-perfis-v15.md) · [OBS WebSocket](docs/integracao-obs-websocket.md) · [Ações e atalhos](docs/acoes.md) · [Notas da v1.0.0](docs/release-v1.0.0.md) · [Histórico](CHANGELOG.md).
 
-- **Linux/`hidraw`:** o suporte atual depende do acesso ao dispositivo `0a00:1000`. A descoberta não depende de um caminho fixo como `/dev/hidraw4`.
-- **Permissões:** prefira execução sem `sudo`, configurando o acesso ao dispositivo por permissões adequadas.
-- **Confirmação do LCD:** não foi identificado um ACK que confirme a **renderização concluída de cada JPEG**. Uma escrita USB bem-sucedida não prova visualização perfeita; a validação física continua importante.
-- **Falhas e reconexão:** há supervisão de hotplug com reinício do processo e espera progressiva. Isso **não** equivale a retransmitir cegamente imagens ou garantir recuperação de qualquer falha.
-- **Operação prolongada:** os testes automatizados e as validações do equipamento não representam certificação de estabilidade contínua em todas as máquinas.
-- **Dependências externas:** recursos específicos exigem OpenBoard, OBS Studio, autorização Wayland ou outros aplicativos instalados e configurados separadamente.
+## Limitações e segurança
 
-## Documentação complementar
-
-- [Vision 02 Studio](docs/vision02-studio.md)
-- [Editor de propriedades por abas](docs/studio-editor-abas.md)
-- [Grade compacta 5 × 3 (v14.1)](docs/studio-deck-compacto-v14-1.md)
-- [Galeria ampliada (v14.2)](docs/studio-galeria-vertical-v14-2.md)
-- [Menu de Perfis integrado (v15)](docs/studio-menu-perfis-v15.md)
-- [Editor interativo de presets (v13)](docs/studio-editor-presets-v13.md)
-- [Perfil OpenBoard](docs/perfil-openboard.md)
-- [Gerenciamento de perfis](docs/gerenciamento-perfis.md)
-- [Recuperação automática USB](docs/hotplug.md)
-- [Histórico de alterações](CHANGELOG.md)
+O projeto depende de Linux/`hidraw` e de permissões adequadas para o USB; prefira execução como usuário normal. O firmware não oferece um ACK individual comprovando que cada JPEG já foi exibido, portanto falhas de renderização exigem validação visual. A recuperação de hotplug não equivale a garantir disponibilidade em qualquer ambiente, e o funcionamento prolongado depende de condições de hardware e sistema. **Nunca publique** `~/.config/vision02/obs.json`, dados pessoais de perfis ou capturas USB que contenham informações sensíveis.
 
 ---
 
-**Rise Mode Vision 02 Linux** é um projeto independente, desenvolvido por engenharia reversa e testes de integração com hardware real. **Não é um driver ou aplicativo oficial da Rise Mode.**
+**Rise Mode Vision 02 Linux** — controlador e Studio comunitários, não oficiais.
