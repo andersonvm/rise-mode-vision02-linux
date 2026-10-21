@@ -118,7 +118,8 @@ def test_cli_catalog_flag_and_profile_persistence(catalog, tmp_path, monkeypatch
         vision.return_value.__enter__.return_value = device
         main(['profile', 'run', '--catalog'])
     assert read_last_active() == 'Observabilidade'
-    assert device.set_image.call_count == 30
+    device.set_images_batch.assert_called_once()
+    assert device.set_image.call_count == 15
 
 
 def test_cli_catalog_resumes_last_profile(catalog, tmp_path, monkeypatch):

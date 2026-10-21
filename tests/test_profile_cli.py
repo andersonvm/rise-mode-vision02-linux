@@ -108,20 +108,11 @@ keys:
         device_class.return_value.__enter__.return_value = device
         main(["profile", "run", str(path)])
 
-    assert device.set_image.call_count == 15
-
-    device.set_image.assert_any_call(
-        physical_key_to_display_id(1),
-        image.resolve(),
-        skip_unchanged=True,
-    )
-
-    display_ids = {
-        call.args[0]
-        for call in device.set_image.call_args_list
-    }
-
-    assert display_ids == set(range(1, 16))
+    device.set_images_batch.assert_called_once()
+    initial_frames = device.set_images_batch.call_args.args[0]
+    assert initial_frames[physical_key_to_display_id(1)] == image.resolve()
+    assert set(initial_frames) == set(range(1, 16))
+    device.set_image.assert_not_called()
 
 
 def test_existing_mapping_command_without_usb(capsys):
@@ -195,7 +186,9 @@ def test_multiple_profiles_switch_on_key_15(tmp_path):
 
     controller = controller_class.return_value
 
-    assert device.set_image.call_count == 30
+    # Carga inicial por lote, troca de perfil ainda por 15 envios individuais.
+    device.set_images_batch.assert_called_once()
+    assert device.set_image.call_count == 15
     controller.suspend.assert_called_once()
     controller.wait_idle.assert_called_once()
     controller.activate.assert_called_once()
