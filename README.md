@@ -1,5 +1,7 @@
 # Rise Mode Vision 02 — controlador experimental para Linux
 
+> **Versão estável:** **v1.0.0** — baseline funcional validada no Ubuntu. A numeração foi reiniciada; releases experimentais anteriores permanecem no histórico.
+
 Controlador em Python para o HID `0a00:1000`, derivado de testes com o equipamento. **Não é software oficial.** Testado experimentalmente no Ubuntu; reconexão automática, confirmação por LCD e operação prolongada ainda não estão implementadas.
 
 ## Instalação em ambiente virtual

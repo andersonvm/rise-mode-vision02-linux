@@ -1,5 +1,26 @@
 # Changelog
 
+## [1.0.0] - 2026-10-21
+
+Primeira versão estável pública. A numeração foi reiniciada após a fase
+experimental; versões e commits anteriores continuam no histórico.
+
+### Incluído e validado
+
+- Vision02 Studio GTK4/libadwaita: edição visual, perfis, ícones e presets.
+- 15 teclas com LCD, perfis YAML, Menu de Perfis e ações programáveis.
+- Inicialização USB/HID em lote sem bordas brancas após inicialização a frio.
+- Brilho global 0–100% pelo Studio e terminal, com persistência e hotplug.
+- Integração com OBS Studio, previews e dashboards locais.
+- 1.600 testes automatizados aprovados na árvore de trabalho antes do
+  ajuste de versões (testes de release devem ser executados novamente).
+
+### Distribuição
+
+- Pacote Debian autônomo `vision02-studio-desktop_1.0.0-1_all.deb`.
+- Publicação por tag `v1.0.0`; builds de `main` não publicam releases.
+- Não modifica perfis pessoais nem configura automaticamente o serviço HID.
+
 ## [0.2.0] - 2026-10-13
 
 ### Adicionado

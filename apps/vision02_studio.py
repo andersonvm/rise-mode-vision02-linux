@@ -109,6 +109,8 @@ class StudioWindow(Adw.ApplicationWindow):
         self._profiles = []
         self._current = ''
         self._connected = False
+        self._brightness_dirty = False
+        self._brightness_syncing = False
         self._previews = {}
         self._live_images = {}
         self._live_active = ''
@@ -3237,7 +3239,18 @@ class StudioWindow(Adw.ApplicationWindow):
 
     def _build_settings(self):
         page = self._page('settings', 'Configurações',
-                          'Atalhos e caminhos da instalação. Nenhuma preferência é alterada nesta página.')
+                          'Brilho global dos 15 LCDs e caminhos da instalação.')
+        page.append(_label('Brilho das teclas LCD (global)', style='title-3'))
+        self.brightness_scale = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, 0, 100, 5)
+        self.brightness_scale.set_value(25)
+        self.brightness_scale.set_digits(0)
+        self.brightness_scale.set_hexpand(True)
+        self.brightness_scale.connect('value-changed', self._brightness_changed)
+        page.append(self.brightness_scale)
+        self.brightness_status = _label('Brilho atual: aguardando serviço…', style='caption', wrap=True)
+        page.append(self.brightness_status)
+        _button(page, 'Aplicar brilho', self._brightness_apply)
+        page.append(_label('Ajuste global dos 15 LCDs (0–100%). A preferência será restaurada ao iniciar o Ubuntu.', style='caption', wrap=True))
         config = Path(os.environ.get('XDG_CONFIG_HOME') or (Path.home() / '.config')) / 'vision02'
         assets = Path(os.environ.get('XDG_DATA_HOME') or (Path.home() / '.local/share')) / 'vision02' / 'assets'
         for label, path in (('Projeto', ROOT), ('Perfis', config / 'profiles'),
@@ -3249,6 +3262,20 @@ class StudioWindow(Adw.ApplicationWindow):
         page.append(row)
         _button(row, 'Gerenciar perfis', lambda *_: self._launch('perfis'))
         _button(row, 'Painel legado', lambda *_: self._launch('dashboard'))
+
+    def _brightness_changed(self, _scale):
+        if not self._brightness_syncing:
+            self._brightness_dirty = True
+            self.brightness_status.set_text(
+                f'Brilho selecionado: {round(self.brightness_scale.get_value())}% — clique em Aplicar brilho.'
+            )
+
+    def _brightness_apply(self, *_args):
+        if not self._connected:
+            self.brightness_status.set_text('Controlador indisponível; verifique vision02.service.')
+            return
+        percent = int(round(self.brightness_scale.get_value()))
+        self._call('brightness', value=percent)
 
     def _launch(self, tool, *, profile=None, key_id=None):
         if tool not in TOOLS:
@@ -3322,6 +3349,8 @@ class StudioWindow(Adw.ApplicationWindow):
                 self.top_status.set_text(f'Falha na importação da imagem: {message}')
                 if self.stack.get_visible_child_name() == 'keys':
                     self.quick_state.set_text(f'Falha ao importar imagem: {message}')
+            elif command == 'brightness':
+                self.brightness_status.set_text(f'Falha ao ajustar brilho: {message}')
             elif command == 'obs':
                 self.obs_state.set_text(f'OBS indisponível: {message}')
             elif command == 'system':
@@ -3335,6 +3364,11 @@ class StudioWindow(Adw.ApplicationWindow):
         if command in {'quick_inspect', 'quick_preview', 'quick_save', 'quick_batch_appearance'}:
             self._quick_received(command, response)
             return False
+        if command == 'brightness':
+            self._brightness_dirty = False
+            self.brightness_status.set_text(f'Brilho aplicado: {response.get("brightness", "?")}%')
+            self._call('status')
+            return False
         if command in {'status', 'switch', 'reload'}:
             if command == 'reload':
                 self._call('previews')
@@ -3343,6 +3377,15 @@ class StudioWindow(Adw.ApplicationWindow):
             if command != 'status':
                 return False
             self._connected = bool(response.get('connected'))
+            actual_brightness = response.get('brightness')
+            if type(actual_brightness) is int and 0 <= actual_brightness <= 100:
+                if not self._brightness_dirty:
+                    self._brightness_syncing = True
+                    try:
+                        self.brightness_scale.set_value(actual_brightness)
+                    finally:
+                        self._brightness_syncing = False
+                    self.brightness_status.set_text(f'Brilho atual: {actual_brightness}%')
             before_profile = self._current
             self._current = str(response.get('active') or '')
             if self._current and self._current != before_profile and not self._quick_dirty:

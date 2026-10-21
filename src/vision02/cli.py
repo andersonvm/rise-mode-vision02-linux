@@ -6,6 +6,7 @@ import argparse
 import json
 from pathlib import Path
 
+from .brightness import save_brightness
 from .controller import Vision02Controller
 from .actions.executor import execute_action
 from .obs_control import OBSWorker
@@ -87,6 +88,8 @@ def build_parser() -> argparse.ArgumentParser:
     control_sub.add_parser("reload", help="Recarrega os YAML sem reiniciar HID")
     control_sub.add_parser("display_preview", help="Consulta as imagens exibidas nos LCDs")
     control_sub.add_parser("key_activity", help="Consulta pressionamentos recentes das 15 teclas")
+    control_brightness = control_sub.add_parser("brightness", help="Consulta ou ajusta o brilho global (0 a 100%%)")
+    control_brightness.add_argument("percent", nargs="?", type=int, help="Brilho percentual dos 15 LCDs")
     control_switch = control_sub.add_parser("switch", help="Ativa um perfil existente")
     control_switch.add_argument("target", help="Nome exato do perfil")
 
@@ -168,8 +171,15 @@ def _run_profile(
 
         def handle_control(command: str, target: str | None) -> dict:
             nonlocal manager, reload_fatal, profile_paths
+            if command == "brightness":
+                if target is not None:
+                    value = int(target)
+                    device.set_brightness(value)
+                    save_brightness(value)
+                return {"brightness": device.brightness}
             if command == "status":
                 return {
+                    "brightness": device.brightness,
                     "connected": True,
                     "active": manager.active_name,
                     "profiles": list(manager.list_profiles()),
@@ -225,12 +235,13 @@ def _run_profile(
             status_worker.start()
             obs_worker.start()
 
-            for key_id, image in render_profile(profile).items():
-                device.set_image(
-                    physical_key_to_display_id(key_id),
-                    image,
-                    skip_unchanged=True,
-                )
+            # Sequência validada no equipamento: CLE FF, 15 JPEGs, STP.
+            # As atualizações dinâmicas posteriores continuam individuais.
+            initial_images = {
+                physical_key_to_display_id(key_id): image
+                for key_id, image in render_profile(profile).items()
+            }
+            device.set_images_batch(initial_images)
 
             if ipc:
                 control_server = ControlServer()
@@ -332,10 +343,13 @@ def main(argv=None) -> None:
         return
 
     if args.action == "control":
+        brightness = getattr(args, "percent", None)
+        if brightness is not None and not 0 <= brightness <= 100:
+            parser.error("Brilho deve estar entre 0 e 100")
         try:
             response = ipc_request(
                 args.control_action,
-                getattr(args, "target", None),
+                str(brightness) if brightness is not None else getattr(args, "target", None),
             )
         except (ConnectionError, OSError, RuntimeError, ValueError, TimeoutError) as exc:
             parser.error(str(exc))

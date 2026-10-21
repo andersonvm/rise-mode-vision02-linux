@@ -9,7 +9,9 @@ import threading
 import time
 from pathlib import Path
 from typing import Callable
+from collections.abc import Mapping
 
+from .brightness import DEFAULT_BRIGHTNESS, load_brightness, validate_brightness
 from .display import encode_image, numbered_image
 from .protocol import INIT_PAYLOADS, REPORT_SIZE, command, image_reports, parse_key_report, physical_key_to_display_id
 
@@ -41,6 +43,7 @@ class Vision02:
         self._local = threading.local()
         self._write_lock = threading.RLock()
         self._display_cache: dict[int, bytes] = {}
+        self._brightness = DEFAULT_BRIGHTNESS
         self._listeners: dict[int, list[Callable[[int], None]]] = {}
         self._release_listeners: dict[int, list[Callable[[int], None]]] = {}
 
@@ -211,11 +214,80 @@ class Vision02:
                 raise
 
     def initialize(self) -> None:
+        # INIT_PAYLOADS mantém a sequência validada (LIG=25). A preferência
+        # global, se diferente, é aplicada sem recarregar as imagens.
+        desired = load_brightness()
         with self._transmission():
             for payload in INIT_PAYLOADS:
                 self._write(command(payload))
                 time.sleep(0.01)
+            if desired != DEFAULT_BRIGHTNESS:
+                self._write(command(b"LIG\x00\x00" + bytes((desired,))))
+            with self._condition:
+                self._brightness = desired
             time.sleep(0.2)
+
+    @property
+    def brightness(self) -> int:
+        with self._condition:
+            return self._brightness
+
+    def set_brightness(self, percent: int) -> None:
+        """Ajusta o brilho global dos 15 LCDs, sem STP ou novo BAT."""
+        percent = validate_brightness(percent)
+        with self._transmission():
+            self._write(command(b"LIG\x00\x00" + bytes((percent,))))
+            with self._condition:
+                self._brightness = percent
+
+    def set_images_batch(
+        self,
+        sources: Mapping[int, object],
+        *,
+        quality: int = 90,
+        subsampling: int = 0,
+    ) -> None:
+        """Inicializa os 15 LCDs em um único lote, conforme captura Windows.
+
+        Toda imagem é codificada antes de enviar CLE FF. O lote mantém o
+        bloqueio de escrita HID até o STP final; o cache só é atualizado
+        depois da conclusão. Atualizações posteriores usam set_image().
+        """
+        images = dict(sources)
+        expected = set(range(1, 16))
+        if set(images) != expected:
+            raise ValueError("O lote inicial exige exatamente os displays 1 a 15")
+
+        with self._operation():
+            prepared = {
+                display_id: encode_image(
+                    images[display_id], quality=quality, subsampling=subsampling
+                )
+                for display_id in sorted(images)
+            }
+            digests = {
+                display_id: sha256(jpeg).digest()
+                for display_id, jpeg in prepared.items()
+            }
+
+            with self._transmission():
+                self._write(command(b"CLE\x00\x00\x00\xff"))
+
+                for display_id, jpeg in prepared.items():
+                    for report in image_reports(display_id, jpeg):
+                        self._write(report)
+                        time.sleep(self.report_delay)
+
+                self._write(command(b"STP"))
+                time.sleep(self.display_delay)
+
+                with self._condition:
+                    if self._faulted:
+                        raise RuntimeError(
+                            "Sessão HID em falha; execute reconnect()"
+                        )
+                    self._display_cache.clear()
+                    self._display_cache.update(digests)
 
     def set_image(
         self,

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "rise-mode-vision02"
-version = "0.2.0"
+version = "1.0.0"
 description = "Controlador experimental Linux para Rise Mode Vision 02 USB HID"
 readme = "README.md"
 requires-python = ">=3.10"
