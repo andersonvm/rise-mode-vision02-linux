@@ -108,6 +108,21 @@ class MirroredDevice:
     def __getattr__(self, name):
         return getattr(self._device, name)
 
+    def set_images_batch(self, sources, *, quality=90, subsampling=0):
+        # Publicar os quadros apenas após o STP final do lote.
+        result = self._device.set_images_batch(
+            sources, quality=quality, subsampling=subsampling,
+        )
+        try:
+            for display_id, source in sorted(sources.items()):
+                self.preview.record(
+                    display_id, source, quality=quality, subsampling=subsampling,
+                )
+        except Exception as exc:
+            self.preview.unavailable()
+            print(f'[Vision02] Espelho dos LCDs indisponível: {exc}', flush=True)
+        return result
+
     def set_image(self, display_id, source, *, quality=90, subsampling=0, skip_unchanged=False):
         # A falha HID deve continuar sendo propagada ao supervisor.
         result = self._device.set_image(
