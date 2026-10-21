@@ -225,12 +225,13 @@ def _run_profile(
             status_worker.start()
             obs_worker.start()
 
-            for key_id, image in render_profile(profile).items():
-                device.set_image(
-                    physical_key_to_display_id(key_id),
-                    image,
-                    skip_unchanged=True,
-                )
+            # Sequência validada no equipamento: CLE FF, 15 JPEGs, STP.
+            # As atualizações dinâmicas posteriores continuam individuais.
+            initial_images = {
+                physical_key_to_display_id(key_id): image
+                for key_id, image in render_profile(profile).items()
+            }
+            device.set_images_batch(initial_images)
 
             if ipc:
                 control_server = ControlServer()
