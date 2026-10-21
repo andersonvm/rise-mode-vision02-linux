@@ -159,6 +159,10 @@ def run(command: str, body: dict | None = None, *, project: Path = ROOT) -> dict
             })
             return {'ok': True, 'image': result['image'], 'id': body['id']}
         raise ValueError('Comando de preset desconhecido')
+    if command == 'brightness':
+        if set(body) != {'value'} or type(body['value']) is not int or not 0 <= body['value'] <= 100:
+            raise ValueError('Informe value inteiro de 0 a 100')
+        return ipc_request('brightness', str(body['value']), timeout=7)
     if command == 'status':
         if body:
             raise ValueError('status não recebe argumentos')
@@ -210,7 +214,7 @@ def run(command: str, body: dict | None = None, *, project: Path = ROOT) -> dict
 def main(argv=None):
     parser = argparse.ArgumentParser(description='Vision 02 Studio — backend JSON seguro')
     parser.add_argument('--command', required=True,
-                        choices=('status', 'switch', 'reload', 'previews', 'live_preview', 'key_activity', 'icons',
+                        choices=('status', 'brightness', 'switch', 'reload', 'previews', 'live_preview', 'key_activity', 'icons',
                                  'quick_inspect', 'quick_preview', 'quick_save', 'quick_batch_appearance',
                                  'import_icon', 'system', 'obs', 'preset_list', 'preset_create', 'preset_rename',
                                  'preset_delete', 'preset_import', 'preset_export', 'preset_apply', 'preset_preview',

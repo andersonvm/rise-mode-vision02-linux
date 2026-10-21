@@ -125,8 +125,8 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--source', type=Path, default=Path(__file__).resolve().parents[2])
     parser.add_argument('--output', type=Path, default=Path('dist'))
-    parser.add_argument('--version', default='15.0.0',
-                        help='Debian upstream version, for example 15.0.0 or 15.0.0~ci23')
+    parser.add_argument('--version', default='1.0.0',
+                        help='Debian upstream version, for example 1.0.0 or 1.0.0~ci23')
     parser.add_argument('--revision', default='1')
     args = parser.parse_args()
     deb = build(args.source, args.output, f'{args.version}-{args.revision}')

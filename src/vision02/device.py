@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Callable
 from collections.abc import Mapping
 
+from .brightness import DEFAULT_BRIGHTNESS, load_brightness, validate_brightness
 from .display import encode_image, numbered_image
 from .protocol import INIT_PAYLOADS, REPORT_SIZE, command, image_reports, parse_key_report, physical_key_to_display_id
 
@@ -42,6 +43,7 @@ class Vision02:
         self._local = threading.local()
         self._write_lock = threading.RLock()
         self._display_cache: dict[int, bytes] = {}
+        self._brightness = DEFAULT_BRIGHTNESS
         self._listeners: dict[int, list[Callable[[int], None]]] = {}
         self._release_listeners: dict[int, list[Callable[[int], None]]] = {}
 
@@ -212,11 +214,31 @@ class Vision02:
                 raise
 
     def initialize(self) -> None:
+        # INIT_PAYLOADS mantém a sequência validada (LIG=25). A preferência
+        # global, se diferente, é aplicada sem recarregar as imagens.
+        desired = load_brightness()
         with self._transmission():
             for payload in INIT_PAYLOADS:
                 self._write(command(payload))
                 time.sleep(0.01)
+            if desired != DEFAULT_BRIGHTNESS:
+                self._write(command(b"LIG\x00\x00" + bytes((desired,))))
+            with self._condition:
+                self._brightness = desired
             time.sleep(0.2)
+
+    @property
+    def brightness(self) -> int:
+        with self._condition:
+            return self._brightness
+
+    def set_brightness(self, percent: int) -> None:
+        """Ajusta o brilho global dos 15 LCDs, sem STP ou novo BAT."""
+        percent = validate_brightness(percent)
+        with self._transmission():
+            self._write(command(b"LIG\x00\x00" + bytes((percent,))))
+            with self._condition:
+                self._brightness = percent
 
     def set_images_batch(
         self,

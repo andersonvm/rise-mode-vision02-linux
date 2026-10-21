@@ -7,7 +7,7 @@ testes automatizados e então empacota o código, a interface e exemplos do Stud
 ## Baixar pela página Releases (recomendado)
 
 1. Abra **[Releases — versão mais recente](https://github.com/andersonvm/rise-mode-vision02-linux/releases/latest)**.
-2. Em **Assets**, baixe `vision02-studio-desktop_15.0.0-1_all.deb` (ou a versão disponível) e `SHA256SUMS`.
+2. Em **Assets**, baixe `vision02-studio-desktop_1.0.0-1_all.deb` (ou a versão disponível) e `SHA256SUMS`.
 3. Abra um terminal na pasta dos downloads e verifique a integridade com `sha256sum -c SHA256SUMS`.
 4. Instale o pacote:
 
@@ -29,11 +29,16 @@ GTK, Pillow, PyYAML e `dbus-next` são obtidas pelo `apt`.
 
 ## Releases automáticas
 
-O workflow executa testes de regressão e **instala o pacote num runner Ubuntu 24.04 para validação** antes de publicá-lo.
+O workflow `Build Ubuntu DEB` executa a suíte de testes, gera o `.deb`,
+verifica launchers e arquivos e realiza smoke test no Ubuntu 24.04.
+Pushes em `main` geram **somente** artefatos temporários. Uma nova release
+é publicada **apenas por uma tag** `vMAJOR.MINOR.PATCH` apontando para
+um commit aprovado da `main`.
 
-- Na primeira execução concluída com sucesso na `main`, cria a Release **v15.0.0** e anexa o `.deb` e o `SHA256SUMS`.
-- Ao enviar uma **nova** tag `vMAJOR.MINOR.PATCH`, cria uma Release correspondente, sem sobrescrever versões já publicadas.
-- Execuções normais na `main` continuam publicando artefatos temporários (30 dias) na [aba Actions](https://github.com/andersonvm/rise-mode-vision02-linux/actions/workflows/build-deb.yml), mas **não substituem o binário da Release v15.0.0**. Para distribuir uma alteração nova, incremente a versão e use uma tag nova.
+A release histórica `v15.0.0` é preservada. A numeração estável reinicia
+em `v1.0.0`; essa release será marcada explicitamente como **Latest**.
+
+Para baixar a versão atual, utilize a página [Releases](https://github.com/andersonvm/rise-mode-vision02-linux/releases).
 
 ## Serviço HID e atualizações
 
@@ -55,7 +60,7 @@ O workflow executa testes de regressão e **instala o pacote num runner Ubuntu 2
 ## Gerar localmente
 
 ```bash
-python3 packaging/debian/build_deb.py --version 15.0.0 --output dist
+python3 packaging/debian/build_deb.py --version 1.0.0 --output dist
 dpkg-deb --info dist/*.deb
 ```
 
@@ -74,3 +79,5 @@ git push origin v15.0.1
 
 **Não reutilize tags de uma Release existente.** Verifique a execução dos testes,
 a instalação do pacote e os Assets antes de anunciar a versão.
+
+> **Nova linha estável:** v1.0.0 inicia a numeração pública. A release histórica v15.0.0 é preservada. Se houver um RC 16.0.0 instalado, o gerenciador de pacotes o tratará como downgrade; confirme a operação conscientemente.

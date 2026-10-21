@@ -22,17 +22,17 @@ def _builder():
 
 def test_rejects_invalid_package_version(tmp_path):
     with pytest.raises(ValueError, match='Invalid Debian version'):
-        _builder().build(ROOT, tmp_path, '../../15.0.0-1')
+        _builder().build(ROOT, tmp_path, '../../1.0.0-1')
 
 
 @pytest.mark.skipif(shutil.which('dpkg-deb') is None, reason='Needs Debian dpkg-deb')
 def test_deb_bundles_full_app_without_user_state(tmp_path):
-    deb = _builder().build(ROOT, tmp_path / 'out', '15.0.0~test1-1')
-    assert deb.name == 'vision02-studio-desktop_15.0.0~test1-1_all.deb'
+    deb = _builder().build(ROOT, tmp_path / 'out', '1.0.0~test1-1')
+    assert deb.name == 'vision02-studio-desktop_1.0.0~test1-1_all.deb'
     assert deb.stat().st_size > 10_000
     fields = subprocess.check_output(['dpkg-deb', '-f', str(deb)], text=True)
     assert 'Package: vision02-studio-desktop' in fields
-    assert 'Version: 15.0.0~test1-1' in fields
+    assert 'Version: 1.0.0~test1-1' in fields
     assert 'python3-pil' in fields and 'python3-dbus-next' in fields
 
     extracted = tmp_path / 'extracted'

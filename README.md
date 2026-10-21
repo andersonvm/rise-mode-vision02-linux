@@ -6,7 +6,7 @@
 
 **[Baixar a última versão estável (.deb) — GitHub Releases](https://github.com/andersonvm/rise-mode-vision02-linux/releases/latest)**
 
-Na página da versão, abra **Assets**, baixe o arquivo `vision02-studio-desktop_15.0.0-1_all.deb` (ou a versão mais recente) e instale com o gerenciador de pacotes do Ubuntu:
+Na página da versão, abra **Assets**, baixe o arquivo `vision02-studio-desktop_1.0.0-1_all.deb` (ou a versão mais recente) e instale com o gerenciador de pacotes do Ubuntu:
 
 ```bash
 sudo apt install ./vision02-studio-desktop_*_all.deb
@@ -14,13 +14,14 @@ sudo apt install ./vision02-studio-desktop_*_all.deb
 
 O pacote inclui o Studio e as bibliotecas do projeto, instala o atalho no menu do Ubuntu e resolve as dependências Python/GTK pelo `apt`. **Não ativa automaticamente o serviço HID**, não altera seus perfis pessoais e não substitui configurações OBS. Para operar os LCDs, configure o controlador com IPC; consulte o [guia de instalação Debian](docs/instalacao-deb.md).
 
-> **Estado do projeto:** a interface **Studio v15** está implementada no código-fonte deste repositório. A versão do *pacote Python* ainda consta como `0.2.0` em `pyproject.toml`; são numerações diferentes. Este é um projeto comunitário, não afiliado ao fabricante.
+> **Versão estável:** **v1.0.0**, primeira baseline funcional validada no Ubuntu. A numeração pública foi reiniciada; a release histórica `v15.0.0` permanece disponível. O pacote Python também utiliza `1.0.0` em `pyproject.toml`. Projeto comunitário, sem afiliação ao fabricante.
 
 ## O que já funciona
 
 | Área | Funcionalidades |
 | --- | --- |
 | **Hardware USB/HID** | Detecção da Vision 02 (VID:PID `0a00:1000`) por sysfs/`hidraw`, leitura das 15 teclas, envio de imagens JPEG aos 15 LCDs e cache de imagens |
+| **LCDs e brilho** | Inicialização em lote dos 15 LCDs sem bordas brancas; brilho global de 0% a 100% por CLI ou Studio, com persistência e restauração após reconexão. |
 | **Ciclo de vida** | Sessão HID persistente, serialização de escrita, tratamento de falhas e supervisor de desconexão/reconexão com espera progressiva |
 | **Vision 02 Studio** | Interface GTK4/libadwaita com painel de controle, edição visual de teclas, perfis, ícones, estado do sistema e integração OBS |
 | **Editor visual** | Grade física **5 × 3 compacta**, seleção de teclas, abas **Ação / Imagem / Texto / Composição**, pré-visualização, salvamento com backup e aplicação via IPC |
@@ -218,7 +219,7 @@ Consulte [ações e atalhos](docs/acoes.md) e [integração OBS WebSocket](docs/
 .venv/bin/python -m pytest -q
 ```
 
-**Referência validada na evolução do Studio v15:** `1554 passed`. Essa contagem corresponde à suíte completa executada no ambiente de desenvolvimento; o resultado pode mudar com novas alterações.
+**Validação da baseline v1.0.0:** testes automatizados executados em uma árvore limpa do projeto; confira o resultado do CI da release para a contagem final.
 
 Os testes automatizados cobrem lógica de perfis, interface, composição de imagens, comunicação simulada, sessão HID, concorrência e integração IPC. **Testes com mocks não substituem testes físicos nos 15 LCDs e na sessão gráfica do Ubuntu.**
 
