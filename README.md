@@ -148,3 +148,11 @@ O projeto depende de Linux/`hidraw` e de permissões adequadas para o USB; prefi
 ---
 
 **Rise Mode Vision 02 Linux** — controlador e Studio comunitários, não oficiais.
+
+## Licença
+
+Este projeto é distribuído sob a **MIT License**.
+Consulte o arquivo [LICENSE](LICENSE) para os termos completos.
+
+O Vision02 Studio é um projeto independente e não possui
+afiliação oficial com a Rise Mode.
